@@ -2,3 +2,10 @@
 resolver = "3"
 members = ["smtp"]
 
+[workspace.dependencies]
+tracing = "0.1.44"
+chrono = "0.4.43"
+dotenv = "0.15.0"
+reqwest = "0.13.1"
+tokio = { version = "1.49.0", features = ["full"] }
+tracing-subscriber = "0.3.22"

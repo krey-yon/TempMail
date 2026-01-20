@@ -1,3 +1,16 @@
+use dotenv::dotenv;
+use smtp::start_smtp_server;
+use tracing::error;
+
 fn main() {
-    println!("Hello, world!");
+    tracing_subscriber::fmt::init();
+
+    if dotenv().is_err(){
+        error!("Failed to load .env file");
+    }
+
+    let addr:std::net::SocketAddr = "0.0.0.25".parse().unwrap();
+    let domain = String::from("mail.jasscodes.in");
+
+    start_smtp_server(addr, domain);
 }
