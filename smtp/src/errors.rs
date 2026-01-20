@@ -59,3 +59,9 @@ impl<'a> SmtpResponseError<'a> {
     }
 }
 
+
+impl Into<u16> for SmtpErrorCode {
+    fn into(self) -> u16 {
+        self.as_code()
+    }
+}

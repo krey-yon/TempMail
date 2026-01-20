@@ -6,10 +6,11 @@ use tokio::{
 };
 use tracing::{Level, error};
 
-use crate::smtp::HandleCurrentState;
+use crate::{errors::SmtpErrorCode, smtp::HandleCurrentState};
 
 const INITIAL_GREETING: &'static [u8] = b"220 Temp Mail Service Ready\n";
 const TIMEOUT: Duration = Duration::from_secs(30);
+const CLOSING_CONNECTION: &'static [u8] = b"221 Goodbye\n";
 
 pub struct Server {
     connection: tokio::net::TcpStream,
@@ -51,12 +52,24 @@ impl Server {
 
                     match self.state_handler.process_smtp_command(message).await {
                         Ok(response) => {
-                            
-                        },
+                            if response  != b"" {
+                                self.connection.write_all(response).await?;
+                            }
+                            if response == CLOSING_CONNECTION {
+                                tracing::warn!("Closing connection!");
+                                break;
+                            }
+                        }
                         Err(err) => {
+                             self.connection
+                                .write_all(err.format_response().as_bytes())
+                                .await?;
+                            tracing::error!("Unexpected End of Stream, closing connection");
+                            if err.code.as_code() >= SmtpErrorCode::SyntaxError.into() {
+                                break;
+                            }
                         }
                     }
-                    break;
                 }
                 Ok(Err(_)) => {
                     error!("Couldn't read stream");

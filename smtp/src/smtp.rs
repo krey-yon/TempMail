@@ -1,15 +1,25 @@
-use crate::types::{CurrentStates, SMTPResult};
+use std::mem::take;
 
+use tracing::{error, info};
+
+use crate::{
+    errors::{SmtpErrorCode, SmtpResponseError},
+    is_email_valid,
+    types::{CurrentStates, Email, SMTPResult},
+};
 
 const MAX_EMAIL_SIZE: usize = 10_485_760;
-
+const SUCCESS_RESPONSE: &'static [u8] = b"250 Ok\n";
+const AUTH_OK: &'static [u8] = b"235 Ok\n";
+const CLOSING_CONNECTION: &'static [u8] = b"221 Goodbye\n";
+const MAX_RECIPIENT_COUNT: usize = 100;
+const DATA_READY_PROMPT: &'static [u8] = b"354 End data with <CR><LF>.<CR><LF>\n";
 
 pub struct HandleCurrentState {
     current_state: CurrentStates,
     greeting_message: String,
     max_email_size: usize,
 }
-
 
 impl HandleCurrentState {
     pub fn new(server_domain: impl AsRef<str>) -> Self {
@@ -28,10 +38,133 @@ impl HandleCurrentState {
         }
     }
 
-    pub async fn process_smtp_command<'a> (
+    pub async fn process_smtp_command<'a>(
         &mut self,
         client_message: &str,
-    ) -> SMTPResult<'a, &[u8]>  {
-        todo!()
+    ) -> SMTPResult<'a, &[u8]> {
+        let message = client_message.trim();
+
+        if message.is_empty() {
+            return Err(SmtpResponseError::new(&SmtpErrorCode::SyntaxError));
+        }
+
+        let mut message_parts = message.split_whitespace();
+        let command = message_parts
+            .next()
+            .ok_or_else(|| SmtpResponseError::new(&SmtpErrorCode::SyntaxError))?
+            .to_lowercase();
+
+        let previous_state = std::mem::replace(&mut self.current_state, CurrentStates::Initial);
+
+        match (command.as_str(), previous_state) {
+            ("ehlo", CurrentStates::Initial) => {
+                self.current_state = CurrentStates::Greeted;
+                Ok(self.greeting_message.as_bytes())
+            },
+            ("helo", CurrentStates::Initial) => {
+                self.current_state = CurrentStates::Greeted;
+                Ok(self.greeting_message.as_bytes())
+            },
+            ("noop", _) | ("help", _) | ("info", _) | ("vrfy", _) | ("expn", _) => {
+                tracing::warn!("RECIEVED: Unhandled commands");
+                Ok(SUCCESS_RESPONSE)
+            }
+            ("rset", _) => {
+                tracing::warn!("RECIEVED: Reset");
+                self.current_state = CurrentStates::Initial;
+                Ok(SUCCESS_RESPONSE)
+            }
+            ("auth", _) => {
+                tracing::trace!("RECIEVED: auth");
+                Ok(AUTH_OK)
+            }
+            ("mail", CurrentStates::Greeted) => {
+                let sender = message_parts
+                    .next()
+                    .and_then(|s| s.strip_prefix("FROM:"))
+                    .ok_or_else(|| SmtpResponseError::new(&SmtpErrorCode::InvalidParameters))?;
+                
+                if !is_email_valid(sender) {
+                    return Err(SmtpResponseError::new(&SmtpErrorCode::MailboxUnavailable));
+                }
+
+                tracing::trace!("RECIEVED MAIL from {}", sender);
+
+                self.current_state = CurrentStates::AwaitingRecipient(Email {
+                    sender: sender.to_string(),
+                    ..Default::default()
+                });
+                Ok(SUCCESS_RESPONSE)
+            }
+            ("rcpt", CurrentStates::AwaitingRecipient(mut email)) => {
+                if email.recipients.len() >= MAX_RECIPIENT_COUNT {
+                    tracing::error!(
+                        "ERROR: Max number of recipients reached, got: {}",
+                        email.recipients.len()
+                    );
+                    return Err(SmtpResponseError::new(
+                        &SmtpErrorCode::InsufficientSystemStorage,
+                    ));
+                }
+                let receiver = message_parts
+                    .next()
+                    .and_then(|s| s.strip_prefix("TO:"))
+                    .ok_or_else(|| SmtpResponseError::new(&SmtpErrorCode::InvalidParameters))?;
+
+                if !is_email_valid(receiver) {
+                    tracing::error!("ERROR: Invalid email: {}", receiver);
+                    return Err(SmtpResponseError::new(&SmtpErrorCode::MailboxUnavailable));
+                }
+
+                email.recipients.push(receiver.to_string());
+                tracing::trace!("RECIEVED: RCPT TO: {}", receiver);
+                self.current_state = CurrentStates::AwaitingRecipient(email);
+                Ok(SUCCESS_RESPONSE)
+            }
+            ("data", CurrentStates::AwaitingRecipient(email)) => {
+                if email.recipients.is_empty() {
+                    tracing::error!("ERROR: Recieved DATA with no recipients");
+                    return Err(SmtpResponseError::new(&SmtpErrorCode::TransactionFailed));
+                }
+                self.current_state = CurrentStates::AwaitingData(email);
+                Ok(DATA_READY_PROMPT)
+            }
+            ("quit", state) => match state {
+                CurrentStates::DataRecieved(email) => {
+                    // TODO: add_mail(email)
+                    info!("email {:?}", email);
+                    Ok(CLOSING_CONNECTION)
+                }
+                _ => {
+                    tracing::warn!("QUIT before DATA completed, discarding mail");
+                    Ok(CLOSING_CONNECTION)
+                }
+            },
+            (_, CurrentStates::AwaitingData(mut email)) => {
+                email.size += client_message.len();
+                if email.size > self.max_email_size {
+                    tracing::error!("ERROR: Message size of 10MB exceeded. Closing!");
+                    return Err(SmtpResponseError::new(
+                        &SmtpErrorCode::MessageSizeExceedsLimit,
+                    ));
+                }
+                email.content.push_str(client_message);
+
+                let response =
+                    if email.content.ends_with("\n.\n") || email.content.ends_with("\r\n.\r\n") {
+                        self.current_state = CurrentStates::DataRecieved(take(&mut email));
+                        SUCCESS_RESPONSE
+                    } else {
+                        self.current_state = CurrentStates::AwaitingData(take(&mut email));
+                        b""
+                    };
+
+                Ok(response)
+            }
+            _ => {
+                error!("Unrecorgnized command");
+                Err(SmtpResponseError::new(&SmtpErrorCode::CommandUnrecognized))
+            }
+        }
     }
 }
