@@ -13,7 +13,7 @@ pub enum CurrentStates {
     Greeted,
     AwaitingRecipient(Email),
     AwaitingData(Email),
-    DataRecieved(Email),
+    DataReceived(Email),
 }
 
 

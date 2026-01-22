@@ -1,7 +1,8 @@
-use std::{error::Error, net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use tokio::{net::TcpListener, time::timeout};
 use tracing::info;
+use database::database::DatabaseClient;
 
 use crate::server::Server;
 mod errors;
@@ -9,30 +10,24 @@ pub mod server;
 mod smtp;
 mod types;
 
-#[tokio::main]
-pub async fn start_smtp_server(addr: SocketAddr, domain: String) -> Result<(), Box<dyn Error>> {
-    let listener = TcpListener::bind(addr).await?;
+pub async fn start_smtp_server(addr: SocketAddr, domain: String) {
+    let listener = TcpListener::bind(addr).await.unwrap();
     let domain = Arc::new(domain);
+    let db = Arc::new(DatabaseClient::connect().await.unwrap());
+    let local_set = tokio::task::LocalSet::new();
 
     info!("Server started on Port: {}", addr);
 
     loop {
-        let (stream, _addr) = listener.accept().await?;
-        let domain = Arc::new(&domain);
+        let (stream, _addr) = listener.accept().await.unwrap();
+        let domain = domain.clone();
+        let db = db.clone();
 
-        // used to make the tasks run in only single thread: TODO: Check if we really need this impl
-        tokio::task::LocalSet::new()
-            .run_until(async move {
-                tracing::info!("Ping received on SMTP Server");
-                let smtp = Server::new(domain.as_str(), stream).await?;
-                match timeout(Duration::from_secs(300), smtp.connection()).await {
-                    Ok(Ok(_)) => Ok(()),
-                    Ok(Err(e)) => Err(e),
-                    Err(e) => Err(Box::new(e) as Box<dyn Error>),
-                }
-            })
-            .await
-            .ok();
+        local_set.run_until(async move {
+            tracing::info!("Ping received on SMTP Server");
+            let smtp = Server::new(domain.as_str(), stream, db).await;
+            let _ = timeout(Duration::from_secs(300), smtp.connection()).await;
+        }).await;
     }
 }
 

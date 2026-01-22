@@ -1,19 +1,25 @@
-use std::mem::take;
+use std::{mem::take, sync::Arc};
 
+use database::database::DatabaseClient;
 use tracing::{error, info};
 
 use crate::{
-    errors::{SmtpErrorCode, SmtpResponseError},
-    is_email_valid,
-    types::{CurrentStates, Email, SMTPResult},
+    errors::{SmtpErrorCode, SmtpResponseError}, is_email_valid, server::CLOSING_CONNECTION, types::{CurrentStates, Email, SMTPResult}
 };
 
 const MAX_EMAIL_SIZE: usize = 10_485_760;
 const SUCCESS_RESPONSE: &'static [u8] = b"250 Ok\n";
 const AUTH_OK: &'static [u8] = b"235 Ok\n";
-const CLOSING_CONNECTION: &'static [u8] = b"221 Goodbye\n";
 const MAX_RECIPIENT_COUNT: usize = 100;
 const DATA_READY_PROMPT: &'static [u8] = b"354 End data with <CR><LF>.<CR><LF>\n";
+
+fn extract_subject(content: &str) -> String {
+    content
+        .lines()
+        .find(|line| line.to_lowercase().starts_with("subject:"))
+        .map(|s| s.trim_start_matches("Subject:").trim_start_matches("subject:").trim().to_string())
+        .unwrap_or_else(|| "(no subject)".to_string())
+}
 
 pub struct HandleCurrentState {
     current_state: CurrentStates,
@@ -41,6 +47,7 @@ impl HandleCurrentState {
     pub async fn process_smtp_command<'a>(
         &mut self,
         client_message: &str,
+        db: &Arc<DatabaseClient>
     ) -> SMTPResult<'a, &[u8]> {
         let message = client_message.trim();
 
@@ -130,9 +137,21 @@ impl HandleCurrentState {
                 Ok(DATA_READY_PROMPT)
             }
             ("quit", state) => match state {
-                CurrentStates::DataRecieved(email) => {
-                    // TODO: add_mail(email)
-                    info!("email {:?}", email);
+                 CurrentStates::DataReceived(email) => {
+                    tracing::info!(recipient_count = email.recipients.len(), "Mail received from {}, saving to database", email.sender);
+                    tracing::debug!(subject = extract_subject(&email.content), size = email.size, "Email details");
+                    tracing::trace!(content_preview = email.content.chars().take(200).collect::<String>(), "Email content preview");
+
+                    let db_email = database::database::Email {
+                        sender: email.sender,
+                        recipients: email.recipients,
+                        content: email.content,
+                        size: email.size,
+                    };
+                    match db.add_mail(db_email).await {
+                        Ok(rows) => tracing::info!("Mail saved to database, rows affected: {}", rows),
+                        Err(e) => tracing::error!("Failed to save mail to database: {}", e),
+                    };
                     Ok(CLOSING_CONNECTION)
                 }
                 _ => {
@@ -152,7 +171,7 @@ impl HandleCurrentState {
 
                 let response =
                     if email.content.ends_with("\n.\n") || email.content.ends_with("\r\n.\r\n") {
-                        self.current_state = CurrentStates::DataRecieved(take(&mut email));
+                        self.current_state = CurrentStates::DataReceived(take(&mut email));
                         SUCCESS_RESPONSE
                     } else {
                         self.current_state = CurrentStates::AwaitingData(take(&mut email));

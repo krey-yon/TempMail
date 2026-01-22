@@ -1,31 +1,35 @@
-use std::{error::Error, time::Duration};
+use std::{error::Error, sync::Arc, time::Duration};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::timeout,
 };
 use tracing::{Level, error};
+use database::database::DatabaseClient;
 
 use crate::{errors::SmtpErrorCode, smtp::HandleCurrentState};
 
 const INITIAL_GREETING: &'static [u8] = b"220 Temp Mail Service Ready\n";
 const TIMEOUT: Duration = Duration::from_secs(30);
-const CLOSING_CONNECTION: &'static [u8] = b"221 Goodbye\n";
+pub const CLOSING_CONNECTION: &'static [u8] = b"221 Goodbye\n";
 
 pub struct Server {
     connection: tokio::net::TcpStream,
     state_handler: HandleCurrentState,
+    db: Arc<DatabaseClient>,
 }
 
 impl Server {
     pub async fn new(
         server_domain: impl AsRef<str>,
         connection: tokio::net::TcpStream,
-    ) -> Result<Self, Box<dyn Error>> {
-        Ok(Self {
+        db: Arc<DatabaseClient>,
+    ) -> Self {
+        Self {
             connection,
             state_handler: HandleCurrentState::new(server_domain),
-        })
+            db,
+        }
     }
 
     pub async fn connection(mut self) -> Result<(), Box<dyn Error>> {
@@ -34,6 +38,7 @@ impl Server {
         self.connection.write_all(INITIAL_GREETING).await?;
         tracing::info!("Greeted");
         let mut buffer: Vec<u8> = vec![0; 65536];
+        let db = self.db.clone();
 
         loop {
             match timeout(TIMEOUT, self.connection.read(&mut buffer)).await {
@@ -50,7 +55,7 @@ impl Server {
                         }
                     };
 
-                    match self.state_handler.process_smtp_command(message).await {
+                    match self.state_handler.process_smtp_command(message, &db).await {
                         Ok(response) => {
                             if response  != b"" {
                                 self.connection.write_all(response).await?;

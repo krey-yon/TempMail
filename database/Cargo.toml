@@ -1,5 +1,5 @@
 [package]
-name = "smtp"
+name = "database"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,6 +7,6 @@ edition = "2024"
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tokio-postgres = { workspace = true }
 chrono = { workspace = true }
 dotenv = { workspace = true }
-database = {workspace = true}
