@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["database","smtp"]
+members = ["database", "http","smtp"]
 
 [workspace.dependencies]
 tracing = "0.1.44"
