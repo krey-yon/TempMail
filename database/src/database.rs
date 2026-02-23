@@ -35,6 +35,7 @@ impl DatabaseClient {
 
         let sql: &str = "
             CREATE TABLE IF NOT EXISTS mail (
+                id BIGSERIAL PRIMARY KEY,
                 date TEXT,
                 sender TEXT,
                 recipients TEXT,
@@ -127,6 +128,58 @@ impl DatabaseClient {
             }
         }
     }
+
+    pub async fn get_mails_by_recipient(&self, recipient: &str) -> Result<Vec<MailRow>, Box<dyn Error>> {
+        let sql = "SELECT id, date, sender, recipients, data FROM mail WHERE recipients = $1 ORDER BY date DESC";
+        match self.db.query(sql, &[&recipient]).await {
+            Ok(rows) => {
+                let mails: Vec<MailRow> = rows
+                    .into_iter()
+                    .map(|row| MailRow {
+                        id: row.get(0),
+                        date: row.get(1),
+                        sender: row.get(2),
+                        recipients: row.get(3),
+                        data: row.get(4),
+                    })
+                    .collect();
+                Ok(mails)
+            }
+            Err(e) => {
+                error!("Failed to get mails: {}", e);
+                Err(Box::new(e))
+            }
+        }
+    }
+
+    pub async fn get_mail_by_id(&self, id: i64) -> Result<Option<MailRow>, Box<dyn Error>> {
+        let sql = "SELECT id, date, sender, recipients, data FROM mail WHERE id = $1";
+        match self.db.query_one(sql, &[&id]).await {
+            Ok(row) => Ok(Some(MailRow {
+                id: row.get(0),
+                date: row.get(1),
+                sender: row.get(2),
+                recipients: row.get(3),
+                data: row.get(4),
+            })),
+            Err(e) if e.to_string().contains("no rows returned") => Ok(None),
+            Err(e) => {
+                error!("Failed to get mail by id: {}", e);
+                Err(Box::new(e))
+            }
+        }
+    }
+
+    pub async fn delete_mail(&self, id: i64) -> Result<u64, Box<dyn Error>> {
+        let sql = "DELETE FROM mail WHERE id = $1";
+        match self.db.execute(sql, &[&id]).await {
+            Ok(rows) => Ok(rows),
+            Err(e) => {
+                error!("Failed to delete mail: {}", e);
+                Err(Box::new(e))
+            }
+        }
+    }
 }
 
 
@@ -137,4 +190,13 @@ pub struct Email {
     pub recipients: Vec<String>,
     pub content: String,
     pub size: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MailRow {
+    pub id: i64,
+    pub date: String,
+    pub sender: String,
+    pub recipients: String,
+    pub data: String,
 }
