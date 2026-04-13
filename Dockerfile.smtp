@@ -1,0 +1,47 @@
+# TempMail SMTP Server Dockerfile
+# Multi-stage build for smaller image
+
+# Build stage
+FROM rust:1.85-slim AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy ALL workspace members (required - workspace references all of them)
+COPY Cargo.toml Cargo.lock ./
+COPY database/ ./database/
+COPY http/ ./http/
+COPY smtp/ ./smtp/
+
+# Build binary using manifest path to avoid http crate conflict
+RUN cargo build --release --manifest-path smtp/Cargo.toml
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser
+
+# Copy binary from builder
+COPY --from=builder /app/target/release/smtp /app/smtp
+
+USER appuser
+
+# Expose SMTP port
+EXPOSE 25
+
+CMD ["/app/smtp"]

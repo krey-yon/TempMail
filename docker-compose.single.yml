@@ -1,0 +1,58 @@
+version: "3.8"
+
+# Single container deployment (SMTP + HTTP in one container)
+# Use this for simple Coolify deployments without separate containers
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: tempmail-db
+    restart: always
+    environment:
+      POSTGRES_USER: tempmail
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD required}
+      POSTGRES_DB: tempmail
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tempmail -d tempmail"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    expose:
+      - "5432"
+
+  # All-in-One TempMail Container
+  tempmail:
+    build:
+      context: .
+      dockerfile: Dockerfile.single
+    container_name: tempmail-allinone
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_USER: tempmail
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD required}
+      DB_NAME: tempmail
+      DB_PORT: "5432"
+      DB_SSLMODE: disable
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "25:25"
+      - "${HTTP_PORT:-3000}:3000"
+    cap_add:
+      - NET_BIND_SERVICE
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:3000/ && nc -z 127.0.0.1 25"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  postgres_data:
+    driver: local

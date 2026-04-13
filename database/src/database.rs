@@ -1,6 +1,9 @@
 use chrono::DateTime;
+use rustls::ClientConfig;
+use rustls_native_certs::load_native_certs;
 use std::{env, error::Error};
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::Client;
+use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{error, info};
 
 pub struct DatabaseClient {
@@ -13,13 +16,31 @@ impl DatabaseClient {
         let user = env::var("DB_USER").expect("DB_USER not set");
         let password = env::var("DB_PASSWORD").expect("DB_PASSWORD not set");
         let dbname = env::var("DB_NAME").expect("DB_NAME not set");
- 
-        let connection_string: String = format!(
-            "host={} user={} password={} dbname={}",
-            host, user, password, dbname
+        let port = env::var("DB_PORT").unwrap_or_else(|_| "5432".to_string());
+        let sslmode = env::var("DB_SSLMODE").unwrap_or_else(|_| "require".to_string());
+
+        // Build a connection string compatible with Neon and standard PostgreSQL.
+        // sslmode=require works for Neon and other managed providers.
+        let connection_string = format!(
+            "host={} port={} user={} password={} dbname={} sslmode={}",
+            host, port, user, password, dbname, sslmode
         );
 
-        let (client, connection) = match tokio_postgres::connect(&connection_string, NoTls).await {
+        // Load native root certificates for TLS validation.
+        let mut root_store = rustls::RootCertStore::empty();
+        let certs = load_native_certs();
+        for cert in certs.certs {
+            // Best-effort add; skip invalid cert entries.
+            let _ = root_store.add(cert);
+        }
+
+        let tls_config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+        let tls = MakeRustlsConnect::new(tls_config);
+
+        let (client, connection) = match tokio_postgres::connect(&connection_string, tls).await {
             Ok((client, connection)) => (client, connection),
             Err(e) => {
                 error!("Failed to connect to the database: {}", e);
@@ -52,6 +73,7 @@ impl DatabaseClient {
                 completed INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS quota_address_idx ON quota(address);
+
             CREATE TABLE IF NOT EXISTS user_config (
                 id SERIAL PRIMARY KEY,
                 mail TEXT NOT NULL UNIQUE,
@@ -77,7 +99,7 @@ impl DatabaseClient {
                 END IF;
             END;
             $$;
-";
+        ";
 
         if let Err(e) = client.batch_execute(sql).await {
             error!("Failed to execute initialization queries: {}", e);
@@ -129,8 +151,12 @@ impl DatabaseClient {
         }
     }
 
-    pub async fn get_mails_by_recipient(&self, recipient: &str) -> Result<Vec<MailRow>, Box<dyn Error>> {
-        let sql = "SELECT id, date, sender, recipients, data FROM mail WHERE recipients = $1 ORDER BY date DESC";
+    pub async fn get_mails_by_recipient(
+        &self,
+        recipient: &str,
+    ) -> Result<Vec<MailRow>, Box<dyn Error>> {
+        let sql =
+            "SELECT id, date, sender, recipients, data FROM mail WHERE recipients = $1 ORDER BY date DESC";
         match self.db.query(sql, &[&recipient]).await {
             Ok(rows) => {
                 let mails: Vec<MailRow> = rows
@@ -182,8 +208,6 @@ impl DatabaseClient {
     }
 }
 
-
-
 #[derive(Default, Clone, Debug)]
 pub struct Email {
     pub sender: String,
@@ -192,7 +216,7 @@ pub struct Email {
     pub size: usize,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, Default)]
 pub struct MailRow {
     pub id: i64,
     pub date: String,

@@ -1,0 +1,56 @@
+# TempMail All-in-One Dockerfile
+# Runs SMTP and HTTP on a single container (for simple deployments)
+
+# Build stage
+FROM rust:1.85-slim AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy ALL workspace members
+COPY Cargo.toml Cargo.lock ./
+COPY database/ ./database/
+COPY http/ ./http/
+COPY smtp/ ./smtp/
+
+# Build binaries
+RUN cargo build --release --manifest-path smtp/Cargo.toml && \
+    cargo build --release --manifest-path http/Cargo.toml
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    openssl \
+    curl \
+    netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser
+
+# Copy binaries from builder
+COPY --from=builder /app/target/release/smtp /app/smtp
+COPY --from=builder /app/target/release/http /app/http
+
+USER appuser
+
+# Expose ports
+EXPOSE 25 3000
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://127.0.0.1:3000/ || nc -z 127.0.0.1 25 || exit 1
+
+# Start both services
+CMD ["/bin/sh", "-c", "/app/smtp & /app/http"]

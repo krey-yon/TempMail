@@ -1,22 +1,27 @@
+version: "3.8"
+
+# Production Docker Compose for Coolify
+# Usage: docker compose -f docker-compose.prod.yml up -d
+
 services:
   # PostgreSQL Database
   db:
     image: postgres:16-alpine
     container_name: tempmail-db
-    restart: unless-stopped
+    restart: always
     environment:
       POSTGRES_USER: tempmail
-      POSTGRES_PASSWORD: tempmail_secret_password
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD required}
       POSTGRES_DB: tempmail
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tempmail -d tempmail"]
       interval: 5s
       timeout: 5s
       retries: 5
+    expose:
+      - "5432"
 
   # SMTP Server (Mail Receiver)
   smtp:
@@ -24,18 +29,18 @@ services:
       context: .
       dockerfile: Dockerfile.smtp
     container_name: tempmail-smtp
-    restart: unless-stopped
+    restart: always
     depends_on:
       db:
         condition: service_healthy
     environment:
       DB_HOST: db
       DB_USER: tempmail
-      DB_PASSWORD: tempmail_secret_password
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD required}
       DB_NAME: tempmail
       DB_PORT: "5432"
       DB_SSLMODE: disable
-      RUST_LOG: info
+      RUST_LOG: ${RUST_LOG:-info}
     ports:
       - "25:25"
     cap_add:
@@ -53,20 +58,20 @@ services:
       context: .
       dockerfile: Dockerfile.http
     container_name: tempmail-http
-    restart: unless-stopped
+    restart: always
     depends_on:
       db:
         condition: service_healthy
     environment:
       DB_HOST: db
       DB_USER: tempmail
-      DB_PASSWORD: tempmail_secret_password
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD required}
       DB_NAME: tempmail
       DB_PORT: "5432"
       DB_SSLMODE: disable
-      RUST_LOG: info
+      RUST_LOG: ${RUST_LOG:-info}
     ports:
-      - "3000:3000"
+      - "${HTTP_PORT:-3000}:3000"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://127.0.0.1:3000/ || exit 1"]
       interval: 10s

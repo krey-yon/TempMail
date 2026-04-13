@@ -47,7 +47,7 @@ impl Server {
                     break;
                 }
                 Ok(Ok(bytes)) => {
-                    let message = match str::from_utf8(&buffer[0..bytes]) {
+                    let message = match std::str::from_utf8(&buffer[0..bytes]) {
                         Ok(a) => a,
                         Err(e) => {
                             tracing::error!("Broken pipe, closing stream: {}", e);

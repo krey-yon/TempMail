@@ -1,7 +1,7 @@
 use std::{mem::take, sync::Arc};
 
 use database::database::DatabaseClient;
-use tracing::{error, info};
+use tracing::error;
 
 use crate::{
     errors::{SmtpErrorCode, SmtpResponseError}, is_email_valid, server::CLOSING_CONNECTION, types::{CurrentStates, Email, SMTPResult}
@@ -90,7 +90,7 @@ impl HandleCurrentState {
                     .next()
                     .and_then(|s| s.strip_prefix("FROM:"))
                     .ok_or_else(|| SmtpResponseError::new(&SmtpErrorCode::InvalidParameters))?;
-                
+
                 if !is_email_valid(sender) {
                     return Err(SmtpResponseError::new(&SmtpErrorCode::MailboxUnavailable));
                 }
@@ -185,5 +185,28 @@ impl HandleCurrentState {
                 Err(SmtpResponseError::new(&SmtpErrorCode::CommandUnrecognized))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_subject() {
+        assert_eq!(extract_subject("Subject: Hello World\n\nBody"), "Hello World");
+        assert_eq!(extract_subject("subject: lowercase\n\nBody"), "lowercase");
+        assert_eq!(extract_subject("No subject line\n\nBody"), "(no subject)");
+        assert_eq!(extract_subject("From: sender@test.com\nSubject: My Subject\n\nBody"), "My Subject");
+    }
+
+    #[test]
+    fn test_max_email_size() {
+        assert_eq!(MAX_EMAIL_SIZE, 10_485_760); // 10MB
+    }
+
+    #[test]
+    fn test_max_recipient_count() {
+        assert_eq!(MAX_RECIPIENT_COUNT, 100);
     }
 }

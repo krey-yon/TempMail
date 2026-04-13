@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts
+target/
+**/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Environment files (use .env.docker for Docker)
+.env
+.env.*
+!.env.docker
+
+# Documentation
+*.md
+!README.md
+
+# Test files
+test_smtp.txt
+*.test
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Coolify
+.dockerignore
+docker-compose.override.yml

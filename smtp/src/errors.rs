@@ -55,7 +55,7 @@ impl<'a> SmtpResponseError<'a> {
     }
 
     pub fn format_response(&self) -> String {
-        format!("{:?} {}\n", self.code, self.message)
+        format!("{} {}\n", self.code.as_code(), self.message)
     }
 }
 
@@ -63,5 +63,44 @@ impl<'a> SmtpResponseError<'a> {
 impl Into<u16> for SmtpErrorCode {
     fn into(self) -> u16 {
         self.as_code()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_codes() {
+        assert_eq!(SmtpErrorCode::SyntaxError.as_code(), 500);
+        assert_eq!(SmtpErrorCode::CommandUnrecognized.as_code(), 500);
+        assert_eq!(SmtpErrorCode::InvalidParameters.as_code(), 501);
+        assert_eq!(SmtpErrorCode::MailboxUnavailable.as_code(), 550);
+        assert_eq!(SmtpErrorCode::InsufficientSystemStorage.as_code(), 452);
+        assert_eq!(SmtpErrorCode::MessageSizeExceedsLimit.as_code(), 552);
+        assert_eq!(SmtpErrorCode::TransactionFailed.as_code(), 554);
+    }
+
+    #[test]
+    fn test_error_messages() {
+        assert_eq!(SmtpErrorCode::SyntaxError.as_message(), "Syntax error, command unrecognized");
+        assert_eq!(SmtpErrorCode::CommandUnrecognized.as_message(), "Command unrecognized");
+        assert_eq!(SmtpErrorCode::InvalidParameters.as_message(), "Syntax error in parameters or arguments");
+        assert_eq!(SmtpErrorCode::MailboxUnavailable.as_message(), "Requested action not taken (mailbox unavailable)");
+        assert_eq!(SmtpErrorCode::InsufficientSystemStorage.as_message(), "Requested action not taken (insufficient system storage)");
+        assert_eq!(SmtpErrorCode::MessageSizeExceedsLimit.as_message(), "Requested action aborted (message size exceeds limit)");
+        assert_eq!(SmtpErrorCode::TransactionFailed.as_message(), "Transaction failed");
+    }
+
+    #[test]
+    fn test_format_response() {
+        let err = SmtpResponseError::new(&SmtpErrorCode::SyntaxError);
+        assert_eq!(err.format_response(), "500 Syntax error, command unrecognized\n");
+    }
+
+    #[test]
+    fn test_into_u16() {
+        let code: u16 = SmtpErrorCode::MailboxUnavailable.into();
+        assert_eq!(code, 550);
     }
 }
