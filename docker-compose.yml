@@ -1,23 +1,4 @@
 services:
-  # PostgreSQL Database
-  db:
-    image: postgres:16-alpine
-    container_name: tempmail-db
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: tempmail
-      POSTGRES_PASSWORD: tempmail_secret_password
-      POSTGRES_DB: tempmail
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U tempmail -d tempmail"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   # SMTP Server (Mail Receiver)
   smtp:
     build:
@@ -25,16 +6,13 @@ services:
       dockerfile: Dockerfile.smtp
     container_name: tempmail-smtp
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
     environment:
-      DB_HOST: db
-      DB_USER: tempmail
-      DB_PASSWORD: tempmail_secret_password
-      DB_NAME: tempmail
+      DB_HOST: YOUR_DB_HOST
+      DB_USER: neondb_owner
+      DB_PASSWORD: YOUR_DB_PASSWORD
+      DB_NAME: neondb
       DB_PORT: "5432"
-      DB_SSLMODE: disable
+      DB_SSLMODE: require
       RUST_LOG: info
     ports:
       - "25:25"
@@ -54,16 +32,13 @@ services:
       dockerfile: Dockerfile.http
     container_name: tempmail-http
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
     environment:
-      DB_HOST: db
-      DB_USER: tempmail
-      DB_PASSWORD: tempmail_secret_password
-      DB_NAME: tempmail
+      DB_HOST: YOUR_DB_HOST
+      DB_USER: neondb_owner
+      DB_PASSWORD: YOUR_DB_PASSWORD
+      DB_NAME: neondb
       DB_PORT: "5432"
-      DB_SSLMODE: disable
+      DB_SSLMODE: require
       RUST_LOG: info
     ports:
       - "3000:3000"
@@ -73,7 +48,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 5s
-
-volumes:
-  postgres_data:
-    driver: local
