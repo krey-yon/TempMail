@@ -3,17 +3,23 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, time::timeout};
 use tracing::info;
 use database::database::DatabaseClient;
+use database::clear_old_mails::clear_old_mails;
 
 use crate::server::Server;
 mod errors;
 pub mod server;
 mod smtp;
 mod types;
+mod webhook;
 
 pub async fn start_smtp_server(addr: SocketAddr, domain: String) {
     let listener = TcpListener::bind(addr).await.unwrap();
     let domain = Arc::new(domain);
     let db = Arc::new(DatabaseClient::connect().await.unwrap());
+
+    // Start background task to clear old mails every hour
+    clear_old_mails(Duration::from_secs(3600));
+
     let local_set = tokio::task::LocalSet::new();
 
     info!("Server started on Port: {}", addr);

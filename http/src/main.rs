@@ -1,6 +1,7 @@
 mod types;
 mod validation;
 mod scheduler;
+mod webhook;
 
 #[cfg(test)]
 mod validation_properties;
@@ -22,7 +23,7 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tracing::{error, info, warn};
 use tracing_subscriber::fmt;
 use types::{ApiResponse, CreateEmailRequest, DeleteEmailResponse};
-use validation::{UsernameValidator, ValidationError};
+use validation::UsernameValidator;
 
 async fn root() -> Json<ApiResponse<&'static str>> {
     Json(ApiResponse::success("Temp Mail HTTP API is running"))
