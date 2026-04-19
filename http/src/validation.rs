@@ -26,6 +26,7 @@ impl fmt::Display for ValidationError {
 impl std::error::Error for ValidationError {}
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum DatabaseError {
     DuplicateAddress,
     NotFound,

@@ -1,10 +1,12 @@
 use std::{mem::take, sync::Arc};
 
 use database::database::DatabaseClient;
-use tracing::error;
+use database::quota::AddressLimits;
+use database::webhooks::Webhooks;
+use tracing::{error, info};
 
 use crate::{
-    errors::{SmtpErrorCode, SmtpResponseError}, is_email_valid, server::CLOSING_CONNECTION, types::{CurrentStates, Email, SMTPResult}
+    errors::{SmtpErrorCode, SmtpResponseError}, is_email_valid, server::CLOSING_CONNECTION, types::{CurrentStates, Email, SMTPResult}, webhook::{extract_otp, send_webhook, Payload}
 };
 
 const MAX_EMAIL_SIZE: usize = 10_485_760;
@@ -142,16 +144,54 @@ impl HandleCurrentState {
                     tracing::debug!(subject = extract_subject(&email.content), size = email.size, "Email details");
                     tracing::trace!(content_preview = email.content.chars().take(200).collect::<String>(), "Email content preview");
 
-                    let db_email = database::database::Email {
-                        sender: email.sender,
-                        recipients: email.recipients,
-                        content: email.content,
-                        size: email.size,
-                    };
-                    match db.add_mail(db_email).await {
-                        Ok(rows) => tracing::info!("Mail saved to database, rows affected: {}", rows),
-                        Err(e) => tracing::error!("Failed to save mail to database: {}", e),
-                    };
+                    // Process each recipient: check quota, save email, send webhook
+                    for recipient in &email.recipients {
+                        let mail_addr = recipient.trim_start_matches('<').trim_end_matches('>');
+
+                        // Check quota and increment if allowed
+                        let quota_ok = match AddressLimits::check_and_increment(db, mail_addr).await {
+                            Ok(true) => true,
+                            Ok(false) => {
+                                tracing::warn!("Quota exceeded for recipient: {}", mail_addr);
+                                false
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to check quota for {}: {}", mail_addr, e);
+                                true // Allow on quota check failure to not lose mail
+                            }
+                        };
+
+                        if !quota_ok {
+                            continue;
+                        }
+
+                        // Save email to database
+                        let db_email = database::database::Email {
+                            sender: email.sender.clone(),
+                            recipients: vec![recipient.clone()],
+                            content: email.content.clone(),
+                            size: email.size,
+                        };
+                        match db.add_mail(db_email).await {
+                            Ok(rows) => tracing::info!("Mail saved to database for {}, rows affected: {}", mail_addr, rows),
+                            Err(e) => tracing::error!("Failed to save mail to database for {}: {}", mail_addr, e),
+                        }
+
+                        // Send webhook notification if configured
+                        if let Ok(Some(webhook_url)) = Webhooks::get_webhook_address_for_mail(db, mail_addr).await {
+                            let otp = extract_otp(&email.content);
+                            let payload = Payload {
+                                version: 1,
+                                otp,
+                                mail: mail_addr.to_string(),
+                            };
+                            match send_webhook(&webhook_url, &payload).await {
+                                Ok(_) => info!("Webhook sent successfully for {}", mail_addr),
+                                Err(e) => tracing::error!("Failed to send webhook for {}: {}", mail_addr, e),
+                            }
+                        }
+                    }
+
                     Ok(CLOSING_CONNECTION)
                 }
                 _ => {

@@ -6,7 +6,7 @@ members = ["database", "http","smtp"]
 tracing = "0.1.44"
 chrono = "0.4.43"
 dotenv = "0.15.0"
-reqwest = "0.13.1"
+reqwest = { version = "0.13.1", features = ["json"] }
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 tracing-subscriber = "0.3.22"
