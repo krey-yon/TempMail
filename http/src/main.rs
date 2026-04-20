@@ -231,8 +231,11 @@ async fn main() {
         error!("Failed to start cleanup scheduler: {}", e);
     }
 
+    // Rate limiter disabled for local testing
     // Configure rate limiter: 5 requests per hour per IP
-    let governor_conf = Arc::new(
+    // Note: SmartIpKeyExtractor requires proxy headers (X-Forwarded-For, X-Real-IP)
+    // For local development without proxy, this may fail
+    let _governor_conf = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(3600) // 1 hour window
             .burst_size(5)    // 5 requests max
@@ -241,8 +244,8 @@ async fn main() {
             .unwrap(),
     );
 
-    let governor_layer = GovernorLayer {
-        config: governor_conf,
+    let _governor_layer = GovernorLayer {
+        config: _governor_conf,
     };
 
     let cors = CorsLayer::new()
@@ -260,7 +263,8 @@ async fn main() {
         .route("/api/emails/:address", get(get_emails))
         .route("/api/emails/:address/:id", get(get_email))
         .route("/api/emails/:address/:id", delete(delete_email))
-        .layer(governor_layer)
+        // Rate limiter disabled for local testing (requires proxy headers)
+        // .layer(governor_layer)
         .with_state(db)
         .layer(cors);
 
