@@ -41,9 +41,6 @@ RUN useradd -m -u 1000 appuser
 COPY --from=builder /app/target/release/smtp /app/smtp
 COPY --from=builder /app/target/release/http /app/http
 
-# Copy env file
-COPY .env.docker /app/.env
-
 # Change ownership
 RUN chown -R appuser:appuser /app
 
@@ -53,4 +50,4 @@ USER appuser
 EXPOSE 25 3000
 
 # Default: run both services
-CMD ["sh", "-c", "source /app/.env && /app/smtp & source /app/.env && /app/http"]
+CMD ["sh", "-c", "/app/smtp & /app/http"]
