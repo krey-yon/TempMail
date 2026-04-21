@@ -19,9 +19,8 @@ COPY database/ ./database/
 COPY http/ ./http/
 COPY smtp/ ./smtp/
 
-# Build binaries
-RUN cargo build --release --manifest-path smtp/Cargo.toml && \
-    cargo build --release --manifest-path http/Cargo.toml
+# Build binaries (from workspace root to properly resolve all dependencies)
+RUN cargo build --release --workspace
 
 # Runtime stage
 FROM debian:bookworm-slim
