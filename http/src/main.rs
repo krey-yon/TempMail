@@ -249,9 +249,12 @@ async fn main() {
     };
 
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::exact(
-            "https://void.kreyon.in".parse().unwrap(),
-        ))
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            let origin_str = origin.to_str().unwrap_or("");
+            origin_str == "https://void.kreyon.in"
+                || origin_str == "http://localhost:3000"
+                || origin_str.starts_with("http://localhost:")
+        }))
         .allow_methods(AllowMethods::any())
         .allow_headers(AllowHeaders::any());
 
