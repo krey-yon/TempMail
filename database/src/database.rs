@@ -395,7 +395,11 @@ impl DatabaseClient {
                         }
                         Err(e) => {
                             error!("Failed to create quota for {}: {}", address, e);
-                            return Err(format!("Failed to restore email quota on server: {}", e).into());
+                            let err_str = e.to_string();
+                            if err_str.contains("duplicate key") {
+                                return Err(format!("Email address '{}' already exists in quota system", address).into());
+                            }
+                            return Err(format!("Database error creating quota: {}", e).into());
                         }
                     }
                 }
@@ -406,7 +410,7 @@ impl DatabaseClient {
                 }
                 Err(e) => {
                     error!("Failed to get connection: {}", e);
-                    return Err(format!("Database server unavailable: {}", e).into());
+                    return Err("Database connection failed. Please check if the database server is running.".into());
                 }
             }
         }
@@ -430,7 +434,11 @@ impl DatabaseClient {
                         }
                         Err(e) => {
                             error!("Failed to create email address: {}", e);
-                            return Err(format!("Failed to create email address on server: {}", e).into());
+                            let err_str = e.to_string();
+                            if err_str.contains("duplicate key") {
+                                return Err(format!("Username '{}' is already taken. Please choose a different username.", username).into());
+                            }
+                            return Err(format!("Database error: {}", e).into());
                         }
                     }
                 }
@@ -441,11 +449,11 @@ impl DatabaseClient {
                 }
                 Err(e) => {
                     error!("Failed to get connection: {}", e);
-                    return Err(format!("Database server unavailable: {}", e).into());
+                    return Err("Database connection failed. Please check if the database server is running.".into());
                 }
             }
         }
-        Err("Max retries exceeded. Please try again.".into())
+        Err("Failed to create email address after multiple retries. Please try again.".into())
     }
 
     pub async fn delete_email_address(&self, address: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {

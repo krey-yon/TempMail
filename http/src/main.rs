@@ -63,10 +63,19 @@ async fn create_email(
         Err(e) => {
             let err_msg = e.to_string();
             error!("Failed to create email address: {}", err_msg);
-            // Return the descriptive error message from database layer
+
+            // Check for specific error types and return appropriate status codes
+            let (status, message) = if err_msg.contains("already exists") || err_msg.contains("duplicate key") {
+                (StatusCode::CONFLICT, format!("Username '{}' is already taken. Please choose a different username.", validated_username))
+            } else if err_msg.contains("server unavailable") || err_msg.contains("connection") {
+                (StatusCode::SERVICE_UNAVAILABLE, "Database server is temporarily unavailable. Please try again later.".to_string())
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, err_msg)
+            };
+
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::<EmailAddress>::error(err_msg)),
+                status,
+                Json(ApiResponse::<EmailAddress>::error(message)),
             )
                 .into_response()
         }
