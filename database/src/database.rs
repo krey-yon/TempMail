@@ -419,13 +419,19 @@ impl DatabaseClient {
         while retry_count < max_retries {
             match self.pool.get().await {
                 Ok(client) => {
-                    // Use DO UPDATE to restore deleted email address entries
-                    let sql = "INSERT INTO email_addresses (address, created_at) VALUES ($1, $2) ON CONFLICT (address) DO UPDATE SET created_at = EXCLUDED.created_at RETURNING address, created_at";
-                    match client.query_one(sql, &[&address, &created_at]).await {
-                        Ok(row) => return Ok(EmailAddress {
-                            address: row.get(0),
-                            created_at: row.get(1),
-                        }),
+                    // Use DO NOTHING for true "create only if not exists" semantics
+                    let sql = "INSERT INTO email_addresses (address, created_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING";
+                    match client.execute(sql, &[&address, &created_at]).await {
+                        Ok(rows) => {
+                            if rows == 0 {
+                                // Conflict - address already exists
+                                return Err(format!("Username '{}' is already taken. Please choose a different username.", username).into());
+                            }
+                            return Ok(EmailAddress {
+                                address: address.clone(),
+                                created_at: Some(created_at),
+                            });
+                        }
                         Err(e) if retry_count < max_retries - 1 => {
                             error!("Failed to create email address (attempt {}): {}", retry_count + 1, e);
                             retry_count += 1;
