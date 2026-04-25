@@ -65,7 +65,10 @@ impl UsernameValidator {
     }
 
     pub fn validate_email_format(email: &str) -> Result<(), ValidationError> {
-        let re = Regex::new(r"^[a-zA-Z0-9_-]+@voidmail\.io$").unwrap();
+        // Get domain from environment or use default
+        let domain = std::env::var("MAIL_DOMAIN").unwrap_or_else(|_| "xelio.me".to_string());
+        let pattern = format!(r"^[a-zA-Z0-9_-]+@{}$", regex::escape(&domain));
+        let re = Regex::new(&pattern).unwrap();
         if !re.is_match(email) {
             return Err(ValidationError::InvalidFormat);
         }
@@ -121,7 +124,7 @@ mod tests {
 
     #[test]
     fn test_valid_email_format() {
-        assert!(UsernameValidator::validate_email_format("vikas@voidmail.io").is_ok());
+        assert!(UsernameValidator::validate_email_format("vikas@xelio.me").is_ok());
     }
 
     #[test]
