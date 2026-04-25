@@ -225,7 +225,7 @@ impl DatabaseClient {
         let client = self.pool.get().await?;
         let normalized_recipient = recipient.trim_start_matches('<').trim_end_matches('>');
         let sql =
-            "SELECT id, date, sender, recipients, data FROM mail WHERE recipients = $1 ORDER BY date DESC";
+            "SELECT id::text, date, sender, recipients, data FROM mail WHERE recipients = $1 ORDER BY date DESC";
         match client.query(sql, &[&normalized_recipient]).await {
             Ok(rows) => {
                 let mails: Vec<MailRow> = rows
@@ -249,7 +249,7 @@ impl DatabaseClient {
 
     pub async fn get_mail_by_id(&self, id: &str) -> Result<Option<MailRow>, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
-        let sql = "SELECT id, date, sender, recipients, data FROM mail WHERE id = $1";
+        let sql = "SELECT id::text, date, sender, recipients, data FROM mail WHERE id = $1::uuid";
         match client.query_one(sql, &[&id]).await {
             Ok(row) => Ok(Some(MailRow {
                 id: row.get(0),
