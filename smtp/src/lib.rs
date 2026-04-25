@@ -18,7 +18,7 @@ pub async fn start_smtp_server(addr: SocketAddr, domain: String) {
     let db = Arc::new(DatabaseClient::connect().await.unwrap());
 
     // Start background task to clear old mails every hour
-    clear_old_mails(Duration::from_secs(3600));
+    clear_old_mails(db.clone(), Duration::from_secs(3600));
 
     let local_set = tokio::task::LocalSet::new();
 

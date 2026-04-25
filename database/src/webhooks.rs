@@ -10,8 +10,9 @@ impl Webhooks {
         db: &Arc<DatabaseClient>,
         mail: &str,
     ) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+        let client = db.pool.get().await?;
         let sql = "SELECT web_hook_address FROM user_config WHERE mail = $1";
-        match db.db.query_one(sql, &[&mail]).await {
+        match client.query_one(sql, &[&mail]).await {
             Ok(row) => Ok(row.get(0)),
             Err(e) if e.to_string().contains("no rows returned") => Ok(None),
             Err(e) => {
@@ -26,9 +27,10 @@ impl Webhooks {
         mail: &str,
         webhook_url: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let client = db.pool.get().await?;
         let address = mail.split('@').next().unwrap_or(mail);
         let sql = "INSERT INTO user_config (mail, address, web_hook_address) VALUES ($1, $2, $3) ON CONFLICT (mail) DO UPDATE SET web_hook_address = $3";
-        match db.db.execute(sql, &[&mail, &address, &webhook_url]).await {
+        match client.execute(sql, &[&mail, &address, &webhook_url]).await {
             Ok(_) => {
                 info!("Set webhook for {} to {}", mail, webhook_url);
                 Ok(())

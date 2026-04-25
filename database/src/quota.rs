@@ -15,8 +15,9 @@ impl AddressLimits {
         db: &Arc<DatabaseClient>,
         address: &str,
     ) -> Result<Option<Self>, Box<dyn Error + Send + Sync>> {
+        let client = db.pool.get().await?;
         let sql = "SELECT address, quota_limit, completed FROM quota WHERE address = $1";
-        match db.db.query_one(sql, &[&address]).await {
+        match client.query_one(sql, &[&address]).await {
             Ok(row) => Ok(Some(AddressLimits {
                 address: row.get(0),
                 limit: row.get(1),
@@ -31,8 +32,9 @@ impl AddressLimits {
     }
 
     pub async fn increment(db: &Arc<DatabaseClient>, address: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let client = db.pool.get().await?;
         let sql = "UPDATE quota SET completed = completed + 1 WHERE address = $1";
-        match db.db.execute(sql, &[&address]).await {
+        match client.execute(sql, &[&address]).await {
             Ok(_) => {
                 info!("Incremented quota for {}", address);
                 Ok(())
@@ -49,8 +51,9 @@ impl AddressLimits {
         address: &str,
         limit: i32,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let client = db.pool.get().await?;
         let sql = "INSERT INTO quota (address, quota_limit, completed) VALUES ($1, $2, 0) ON CONFLICT (address) DO NOTHING";
-        match db.db.execute(sql, &[&address, &limit]).await {
+        match client.execute(sql, &[&address, &limit]).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 error!("Failed to create quota: {}", e);
