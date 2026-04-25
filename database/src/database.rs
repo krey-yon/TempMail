@@ -380,44 +380,22 @@ impl DatabaseClient {
         let mut retry_count = 0;
         let max_retries = 3;
 
-        // Create quota entry with retry
-        while retry_count < max_retries {
-            match self.create_quota(&address, default_quota_limit).await {
-                Ok(_) => break,
-                Err(e) if retry_count < max_retries - 1 => {
-                    error!("Failed to create quota for {} (attempt {}): {}", address, retry_count + 1, e);
-                    retry_count += 1;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100 * (retry_count as u64))).await;
-                }
-                Err(e) => {
-                    error!("Failed to create quota for {}: {}", address, e);
-                    return Err(e);
-                }
-            }
-        }
-
-        retry_count = 0;
+        // Create or restore quota entry with retry
         while retry_count < max_retries {
             match self.pool.get().await {
                 Ok(client) => {
-                    let sql = "INSERT INTO email_addresses (address, created_at) VALUES ($1, $2) RETURNING address, created_at";
-                    match client.query_one(sql, &[&address, &created_at]).await {
-                        Ok(row) => return Ok(EmailAddress {
-                            address: row.get(0),
-                            created_at: row.get(1),
-                        }),
-                        Err(e) if e.to_string().contains("duplicate key") => {
-                            return Err("Email address already exists".into());
-                        }
+                    // Use DO UPDATE to restore deleted quota entries
+                    let sql = "INSERT INTO quota (address, quota_limit, completed) VALUES ($1, $2, 0) ON CONFLICT (address) DO UPDATE SET quota_limit = EXCLUDED.quota_limit, completed = 0";
+                    match client.execute(sql, &[&address, &default_quota_limit]).await {
+                        Ok(_) => break,
                         Err(e) if retry_count < max_retries - 1 => {
-                            error!("Failed to create email address (attempt {}): {}", retry_count + 1, e);
+                            error!("Failed to create quota for {} (attempt {}): {}", address, retry_count + 1, e);
                             retry_count += 1;
                             tokio::time::sleep(tokio::time::Duration::from_millis(100 * (retry_count as u64))).await;
-                            continue;
                         }
                         Err(e) => {
-                            error!("Failed to create email address: {}", e);
-                            return Err(Box::new(e));
+                            error!("Failed to create quota for {}: {}", address, e);
+                            return Err(format!("Failed to restore email quota on server: {}", e).into());
                         }
                     }
                 }
@@ -428,11 +406,46 @@ impl DatabaseClient {
                 }
                 Err(e) => {
                     error!("Failed to get connection: {}", e);
-                    return Err(Box::new(e));
+                    return Err(format!("Database server unavailable: {}", e).into());
                 }
             }
         }
-        Err("Max retries exceeded".into())
+
+        retry_count = 0;
+        while retry_count < max_retries {
+            match self.pool.get().await {
+                Ok(client) => {
+                    // Use DO UPDATE to restore deleted email address entries
+                    let sql = "INSERT INTO email_addresses (address, created_at) VALUES ($1, $2) ON CONFLICT (address) DO UPDATE SET created_at = EXCLUDED.created_at RETURNING address, created_at";
+                    match client.query_one(sql, &[&address, &created_at]).await {
+                        Ok(row) => return Ok(EmailAddress {
+                            address: row.get(0),
+                            created_at: row.get(1),
+                        }),
+                        Err(e) if retry_count < max_retries - 1 => {
+                            error!("Failed to create email address (attempt {}): {}", retry_count + 1, e);
+                            retry_count += 1;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100 * (retry_count as u64))).await;
+                            continue;
+                        }
+                        Err(e) => {
+                            error!("Failed to create email address: {}", e);
+                            return Err(format!("Failed to create email address on server: {}", e).into());
+                        }
+                    }
+                }
+                Err(e) if retry_count < max_retries - 1 => {
+                    error!("Failed to get connection (attempt {}): {}", retry_count + 1, e);
+                    retry_count += 1;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100 * (retry_count as u64))).await;
+                }
+                Err(e) => {
+                    error!("Failed to get connection: {}", e);
+                    return Err(format!("Database server unavailable: {}", e).into());
+                }
+            }
+        }
+        Err("Max retries exceeded. Please try again.".into())
     }
 
     pub async fn delete_email_address(&self, address: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {

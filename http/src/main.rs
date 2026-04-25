@@ -60,25 +60,13 @@ async fn create_email(
             )
                 .into_response()
         }
-        Err(e) if e.to_string().contains("already exists") => {
-            warn!("Duplicate email address attempt: {}", validated_username);
-            // Track failed attempt
-            let _ = db.increment_analytics("duplicate_address_attempt").await;
-            (
-                StatusCode::CONFLICT,
-                Json(ApiResponse::<EmailAddress>::error(
-                    "Email address already exists".to_string(),
-                )),
-            )
-                .into_response()
-        }
         Err(e) => {
-            error!("Failed to create email address: {}", e);
+            let err_msg = e.to_string();
+            error!("Failed to create email address: {}", err_msg);
+            // Return the descriptive error message from database layer
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::<EmailAddress>::error(
-                    "Internal server error".to_string(),
-                )),
+                Json(ApiResponse::<EmailAddress>::error(err_msg)),
             )
                 .into_response()
         }

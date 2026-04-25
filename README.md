@@ -1,189 +1,85 @@
 # TempMail
 
-A temporary email service with SMTP server for receiving emails and HTTP API for management.
-
-## Features
-
-- **Temporary Email Addresses**: Create disposable email addresses instantly
-- **SMTP Server**: Receive emails on port 25
-- **HTTP API**: Manage email addresses and view emails on port 3000
-- **Webhooks**: Get notified when emails arrive
-- **Rate Limiting**: DDoS protection with 100 requests/second per IP
-- **Analytics**: Track usage statistics via `/api/stats`
-- **UUID-based IDs**: Secure, non-sequential identifiers for all entities
-- **Automatic Cleanup**: Emails deleted after 1 day
+Temporary email service with SMTP receiving and HTTP API.
 
 ## Architecture
 
-| Service | Port | Purpose |
-|---------|------|---------|
-| HTTP API | 3000 | REST API for email management |
-| SMTP Server | 25 | Receives incoming emails |
+```mermaid
+flowchart TB
+    subgraph Internet["Internet"]
+        Sender["Email Sender"]
+        FE["Frontend<br/>https://www.xelio.me"]
+    end
+
+    subgraph Services["Services"]
+        SMTP["SMTP Server<br/>:25"]
+        HTTP["HTTP API<br/>:3000"]
+    end
+
+    subgraph Database["PostgreSQL"]
+        EA["email_addresses"]
+        M["mail"]
+        Q["quota"]
+        UC["user_config"]
+        AN["analytics"]
+    end
+
+    Sender -->|"Port 25"| SMTP
+    FE -->|"REST API"| HTTP
+    SMTP <-->|Reads/Writes| Database
+    HTTP <-->|Reads/Writes| Database
+
+    EA --- Q
+    Q --> UC
+    M --> EA
+    AN -->|"tracks"| M
+    AN -->|"tracks"| EA
+```
+
+## Features
+
+- SMTP server for receiving emails
+- REST API for email management
+- UUID-based identifiers
+- Rate limiting (100 req/sec, burst 150)
+- Analytics tracking
+- Automatic cleanup after 1 day
 
 ## Quick Start
 
-### Prerequisites
-
-- Rust (latest stable)
-- PostgreSQL database
-- `.env` file with database credentials
-
-### Environment Variables
-
-```env
-DB_HOST=localhost
-DB_USER=postgres
-DB_PASSWORD=your_password
-DB_NAME=tempmail
-DB_PORT=5432
-MAIL_DOMAIN=mail.kreyon.in
-SMTP_PORT=25
-RUST_LOG=info
-```
-
-### Build and Run
-
 ```bash
-# Build all services
+# Build
 cargo build --release
 
-# Run HTTP API
-cargo run --package http
-
-# Run SMTP server (in separate terminal)
-cargo run --package smtp
+# Run services
+cargo run --package http    # API on :3000
+cargo run --package smtp    # SMTP on :25
 ```
 
 ## API Endpoints
 
-### Health Check
-```
-GET /
-```
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/` | Health check |
+| POST | `/api/emails` | Create email address |
+| GET | `/api/emails` | List all addresses |
+| GET | `/api/emails/:address` | Get emails for address |
+| DELETE | `/api/emails/:address` | Delete address |
+| GET | `/api/emails/:address/:id` | Get single email |
+| DELETE | `/api/emails/:address/:id` | Delete email |
+| GET | `/api/stats` | Get usage statistics |
 
-### Create Email Address
-```
-POST /api/emails
-Content-Type: application/json
+## Environment Variables
 
-{"username": "myuser"}
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_HOST` | (required) | PostgreSQL host |
+| `DB_USER` | (required) | Database user |
+| `DB_PASSWORD` | (required) | Database password |
+| `DB_NAME` | (required) | Database name |
+| `MAIL_DOMAIN` | `xelio.me` | Email domain |
+| `SMTP_PORT` | `25` | SMTP port |
 
-### List All Addresses
-```
-GET /api/emails
-```
+## CORS
 
-### Get Emails for Address
-```
-GET /api/emails/:address
-```
-
-### Delete Email Address
-```
-DELETE /api/emails/:address
-```
-
-### Get Single Email
-```
-GET /api/emails/:address/:id
-```
-
-### Delete Single Email
-```
-DELETE /api/emails/:address/:id
-```
-
-### Get Statistics (Analytics)
-```
-GET /api/stats
-```
-
-Response:
-```json
-{
-    "success": true,
-    "data": {
-        "total_addresses": 100,
-        "total_emails": 500,
-        "total_webhooks": 25,
-        "events": [
-            {"event_type": "emails_received", "event_count": 450, "last_updated": "2026-04-26 10:00:00"},
-            {"event_type": "email_address_created", "event_count": 100, "last_updated": "2026-04-26 10:00:00"}
-        ]
-    }
-}
-```
-
-## SMTP Usage
-
-Connect to port 25 and send emails:
-
-```
-EHLO localhost
-MAIL FROM:<sender@example.com>
-RCPT TO:<recipient@mail.kreyon.in>
-DATA
-From: sender@example.com
-To: recipient@mail.kreyon.in
-Subject: Hello
-
-Hello World!
-.
-QUIT
-```
-
-## Rate Limiting
-
-- **Limit**: 100 requests per second per IP
-- **Burst**: Up to 150 requests
-- **Implementation**: tower-governor with SmartIpKeyExtractor
-
-Requires proxy headers (`X-Forwarded-For`, `X-Real-IP`) when behind a reverse proxy.
-
-## Cleanup Schedule
-
-| Task | Schedule | Action |
-|------|----------|--------|
-| Email Cleanup (HTTP) | Daily at 2:00 AM UTC | Deletes emails older than 1 day |
-| Email Cleanup (SMTP) | Every hour | Deletes emails older than 1 day |
-
-## Quota System
-
-Each email address has a default quota of 1000 emails. When exceeded, new emails are silently dropped.
-
-## Response Format
-
-All API responses follow this structure:
-
-```json
-{
-    "success": true,
-    "data": <result>,
-    "error": null
-}
-```
-
-## Database Schema
-
-### Tables
-
-- `mail` - Stores received emails (UUID primary key)
-- `email_addresses` - Created email addresses (UUID primary key)
-- `quota` - Email limits per address (UUID primary key)
-- `user_config` - User settings and webhooks (UUID primary key)
-- `analytics` - Usage tracking counters
-
-## Project Structure
-
-```
-TempMail/
-├── database/          # Database client and schema
-├── http/              # HTTP API server
-├── smtp/              # SMTP server
-└── README.md
-```
-
-## License
-
-MIT
+Allowed origins: `https://www.xelio.me`, `localhost:*`
