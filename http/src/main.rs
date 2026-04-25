@@ -271,12 +271,12 @@ async fn main() {
         error!("Failed to start cleanup scheduler: {}", e);
     }
 
-    // Configure rate limiter: 100 requests per minute per IP (DDoS protection)
+    // Configure rate limiter: 200 requests per second per IP (DDoS protection)
     // Note: SmartIpKeyExtractor requires proxy headers (X-Forwarded-For, X-Real-IP)
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(100) // 100 requests per second
-            .burst_size(150) // Allow burst of up to 150 requests
+            .per_second(200) // 200 requests per second
+            .burst_size(250) // Allow burst of up to 250 requests
             .key_extractor(SmartIpKeyExtractor)
             .finish()
             .unwrap(),
