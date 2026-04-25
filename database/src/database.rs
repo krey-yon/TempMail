@@ -21,7 +21,7 @@ pub struct Email {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MailRow {
-    pub id: i64,
+    pub id: String,
     pub date: String,
     pub sender: String,
     pub recipients: String,
@@ -74,8 +74,10 @@ impl DatabaseClient {
         // Initialize database schema
         let client = pool.get().await?;
         let sql: &str = r#"
+            CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
             CREATE TABLE IF NOT EXISTS mail (
-                id BIGSERIAL PRIMARY KEY,
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 date TEXT,
                 sender TEXT,
                 recipients TEXT,
@@ -86,7 +88,7 @@ impl DatabaseClient {
             CREATE INDEX IF NOT EXISTS mail_date_recipients ON mail(date, recipients);
 
             CREATE TABLE IF NOT EXISTS quota (
-                id SERIAL PRIMARY KEY,
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 address TEXT NOT NULL UNIQUE,
                 quota_limit INTEGER NOT NULL,
                 completed INTEGER NOT NULL DEFAULT 0
@@ -94,7 +96,7 @@ impl DatabaseClient {
             CREATE INDEX IF NOT EXISTS quota_address_idx ON quota(address);
 
             CREATE TABLE IF NOT EXISTS user_config (
-                id SERIAL PRIMARY KEY,
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 mail TEXT NOT NULL UNIQUE,
                 address TEXT NOT NULL,
                 web_hook_address TEXT
@@ -120,11 +122,19 @@ impl DatabaseClient {
             $$;
 
             CREATE TABLE IF NOT EXISTS email_addresses (
-                id BIGSERIAL PRIMARY KEY,
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 address TEXT NOT NULL UNIQUE,
                 created_at TEXT NOT NULL DEFAULT (now()::text)
             );
             CREATE INDEX IF NOT EXISTS email_addresses_address_idx ON email_addresses(address);
+
+            CREATE TABLE IF NOT EXISTS analytics (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                event_type TEXT NOT NULL,
+                event_count BIGINT NOT NULL DEFAULT 0,
+                last_updated TEXT NOT NULL DEFAULT (now()::text)
+            );
+            CREATE INDEX IF NOT EXISTS analytics_event_type_idx ON analytics(event_type);
         "#;
 
         if let Err(e) = client.batch_execute(sql).await {
@@ -192,12 +202,12 @@ impl DatabaseClient {
     pub async fn delete_old_mail(&self) -> Result<u64, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
         let now: DateTime<chrono::Utc> = chrono::offset::Utc::now();
-        let a_week_ago: DateTime<chrono::Utc> = now - chrono::Duration::days(7);
-        let a_week_ago: String = a_week_ago.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        let a_day_ago: DateTime<chrono::Utc> = now - chrono::Duration::days(1);
+        let a_day_ago: String = a_day_ago.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
 
-        info!("Deleting old mail from before {}", a_week_ago);
+        info!("Deleting old mail from before {}", a_day_ago);
         match client
-            .execute("DELETE FROM mail WHERE date < $1", &[&a_week_ago])
+            .execute("DELETE FROM mail WHERE date < $1", &[&a_day_ago])
             .await
         {
             Ok(rows) => Ok(rows),
@@ -237,7 +247,7 @@ impl DatabaseClient {
         }
     }
 
-    pub async fn get_mail_by_id(&self, id: i64) -> Result<Option<MailRow>, Box<dyn Error + Send + Sync>> {
+    pub async fn get_mail_by_id(&self, id: &str) -> Result<Option<MailRow>, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
         let sql = "SELECT id, date, sender, recipients, data FROM mail WHERE id = $1";
         match client.query_one(sql, &[&id]).await {
@@ -256,7 +266,7 @@ impl DatabaseClient {
         }
     }
 
-    pub async fn delete_mail(&self, id: i64) -> Result<u64, Box<dyn Error + Send + Sync>> {
+    pub async fn delete_mail(&self, id: &str) -> Result<u64, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
         let sql = "DELETE FROM mail WHERE id = $1";
         match client.execute(sql, &[&id]).await {
@@ -473,4 +483,88 @@ impl DatabaseClient {
             }
         }
     }
+
+    // ============== ANALYTICS OPERATIONS ==============
+
+    pub async fn increment_analytics(&self, event_type: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let client = self.pool.get().await?;
+        let sql = r#"
+            INSERT INTO analytics (event_type, event_count, last_updated)
+            VALUES ($1, 1, now()::text)
+            ON CONFLICT (event_type) DO UPDATE SET
+                event_count = analytics.event_count + 1,
+                last_updated = now()::text
+        "#;
+        match client.execute(sql, &[&event_type]).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                error!("Failed to increment analytics: {}", e);
+                Err(Box::new(e))
+            }
+        }
+    }
+
+    pub async fn get_analytics(&self) -> Result<Vec<AnalyticsRow>, Box<dyn Error + Send + Sync>> {
+        let client = self.pool.get().await?;
+        let sql = "SELECT event_type, event_count, last_updated FROM analytics ORDER BY event_count DESC";
+        match client.query(sql, &[]).await {
+            Ok(rows) => {
+                let analytics: Vec<AnalyticsRow> = rows
+                    .into_iter()
+                    .map(|row| AnalyticsRow {
+                        event_type: row.get(0),
+                        event_count: row.get(1),
+                        last_updated: row.get(2),
+                    })
+                    .collect();
+                Ok(analytics)
+            }
+            Err(e) => {
+                error!("Failed to get analytics: {}", e);
+                Err(Box::new(e))
+            }
+        }
+    }
+
+    pub async fn get_total_stats(&self) -> Result<TotalStats, Box<dyn Error + Send + Sync>> {
+        let client = self.pool.get().await?;
+
+        let email_addresses_count: i64 = client
+            .query_one("SELECT COUNT(*) FROM email_addresses", &[])
+            .await
+            .map(|row| row.get(0))
+            .unwrap_or(0);
+
+        let total_emails_count: i64 = client
+            .query_one("SELECT COUNT(*) FROM mail", &[])
+            .await
+            .map(|row| row.get(0))
+            .unwrap_or(0);
+
+        let total_webhooks_count: i64 = client
+            .query_one("SELECT COUNT(*) FROM user_config WHERE web_hook_address IS NOT NULL", &[])
+            .await
+            .map(|row| row.get(0))
+            .unwrap_or(0);
+
+        Ok(TotalStats {
+            total_email_addresses: email_addresses_count,
+            total_emails_received: total_emails_count,
+            total_webhooks_configured: total_webhooks_count,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalyticsRow {
+    pub event_type: String,
+    pub event_count: i64,
+    pub last_updated: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TotalStats {
+    pub total_email_addresses: i64,
+    pub total_emails_received: i64,
+    pub total_webhooks_configured: i64,
 }

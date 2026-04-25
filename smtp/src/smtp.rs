@@ -173,7 +173,11 @@ impl HandleCurrentState {
                             size: email.size,
                         };
                         match db.add_mail(db_email).await {
-                            Ok(rows) => tracing::info!("Mail saved to database for {}, rows affected: {}", mail_addr, rows),
+                            Ok(rows) => {
+                                tracing::info!("Mail saved to database for {}, rows affected: {}", mail_addr, rows);
+                                // Track analytics
+                                let _ = db.increment_analytics("emails_received").await;
+                            }
                             Err(e) => tracing::error!("Failed to save mail to database for {}: {}", mail_addr, e),
                         }
 

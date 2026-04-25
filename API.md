@@ -7,7 +7,7 @@ TempMail is a temporary email service with two components:
 - **SMTP Server** (port 25) - Email receiving server
 
 Base URL:
-- Production: `https://api.xelio.me` (or `https://void.kreyon.in`)
+- Production: `https://void.kreyon.in`
 - Local: `http://localhost:3000`
 
 ---
@@ -26,28 +26,34 @@ Base URL:
 **Tables:**
 
 1. `email_addresses` - Stores created email addresses
-   - `id` (BIGSERIAL PRIMARY KEY)
-   - `address` (TEXT, UNIQUE) - Full email address like `user@xelio.me`
+   - `id` (UUID PRIMARY KEY)
+   - `address` (TEXT, UNIQUE) - Full email address like `user@mail.kreyon.in`
    - `created_at` (TEXT) - Timestamp
 
 2. `mail` - Stores received emails
-   - `id` (BIGSERIAL PRIMARY KEY)
+   - `id` (UUID PRIMARY KEY)
    - `date` (TEXT) - Timestamp
    - `sender` (TEXT) - Sender email address
    - `recipients` (TEXT) - Recipient email address
    - `data` (TEXT) - Raw RFC 5322 email content
 
 3. `quota` - Email limits per address
-   - `id` (SERIAL PRIMARY KEY)
+   - `id` (UUID PRIMARY KEY)
    - `address` (TEXT, UNIQUE) - Email address
    - `quota_limit` (INTEGER) - Max emails allowed (default: 1000)
    - `completed` (INTEGER) - Current email count
 
 4. `user_config` - User settings with webhook URLs
-   - `id` (SERIAL PRIMARY KEY)
+   - `id` (UUID PRIMARY KEY)
    - `mail` (TEXT, UNIQUE) - Email address
    - `address` (TEXT) - Username part
    - `web_hook_address` (TEXT) - Webhook URL for notifications
+
+5. `analytics` - Usage tracking counters
+   - `id` (UUID PRIMARY KEY)
+   - `event_type` (TEXT) - Event name
+   - `event_count` (BIGINT) - Counter
+   - `last_updated` (TEXT) - Last update timestamp
 
 ---
 
@@ -95,7 +101,7 @@ Content-Type: application/json
 {
     "success": true,
     "data": {
-        "address": "testuser@xelio.me",
+        "address": "testuser@mail.kreyon.in",
         "created_at": "2026-04-25 09:36:38.040"
     },
     "error": null
@@ -136,7 +142,7 @@ GET /api/emails
     "success": true,
     "data": [
         {
-            "address": "testuser@xelio.me",
+            "address": "testuser@mail.kreyon.in",
             "created_at": "2026-04-25 09:36:38.040",
             "email_count": 5
         }
@@ -157,7 +163,7 @@ DELETE /api/emails/:address
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| address | string | Full email address (URL encoded, e.g., `testuser%40xelio.me`) |
+| address | string | Full email address (URL encoded, e.g., `testuser%40mail.kreyon.in`) |
 
 **Success Response (200 OK):**
 ```json
@@ -165,7 +171,7 @@ DELETE /api/emails/:address
     "success": true,
     "data": {
         "message": "Email address deleted successfully",
-        "address": "testuser@xelio.me"
+        "address": "testuser@mail.kreyon.in"
     },
     "error": null
 }
@@ -200,11 +206,11 @@ GET /api/emails/:address
     "success": true,
     "data": [
         {
-            "id": 1,
+            "id": "550e8400-e29b-41d4-a716-446655440000",
             "date": "2026-04-25 09:40:00.000",
             "sender": "<sender@example.com>",
-            "recipients": "<testuser@xelio.me>",
-            "data": "From: sender@example.com\r\nTo: testuser@xelio.me\r\nSubject: Hello\r\n\r\nHello World!"
+            "recipients": "<testuser@mail.kreyon.in>",
+            "data": "From: sender@example.com\r\nTo: testuser@mail.kreyon.in\r\nSubject: Hello\r\n\r\nHello World!"
         }
     ],
     "error": null
@@ -213,7 +219,7 @@ GET /api/emails/:address
 
 | Field | Type | Description |
 |-------|------|-------------|
-| id | integer | Unique email ID |
+| id | string (UUID) | Unique email ID |
 | date | string | Timestamp when email was received |
 | sender | string | Sender's email address (with `<>`) |
 | recipients | string | Recipient's email address (with `<>`) |
@@ -232,18 +238,18 @@ GET /api/emails/:address/:id
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | address | string | Full email address (URL encoded) |
-| id | integer | Email ID |
+| id | string (UUID) | Email ID |
 
 **Success Response (200 OK):**
 ```json
 {
     "success": true,
     "data": {
-        "id": 1,
+        "id": "550e8400-e29b-41d4-a716-446655440000",
         "date": "2026-04-25 09:40:00.000",
         "sender": "<sender@example.com>",
-        "recipients": "<testuser@xelio.me>",
-        "data": "From: sender@example.com\r\nTo: testuser@xelio.me\r\nSubject: Hello\r\n\r\nHello World!"
+        "recipients": "<testuser@mail.kreyon.in>",
+        "data": "From: sender@example.com\r\nTo: testuser@mail.kreyon.in\r\nSubject: Hello\r\n\r\nHello World!"
     },
     "error": null
 }
@@ -271,7 +277,7 @@ DELETE /api/emails/:address/:id
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | address | string | Full email address (URL encoded) |
-| id | integer | Email ID |
+| id | string (UUID) | Email ID |
 
 **Success Response (200 OK):**
 ```json
@@ -293,6 +299,53 @@ DELETE /api/emails/:address/:id
 
 ---
 
+### Get Statistics (Analytics)
+
+Get usage statistics including total addresses, emails, webhooks, and event counts.
+
+```
+GET /api/stats
+```
+
+**Success Response (200 OK):**
+```json
+{
+    "success": true,
+    "data": {
+        "total_addresses": 100,
+        "total_emails": 500,
+        "total_webhooks": 25,
+        "events": [
+            {
+                "event_type": "emails_received",
+                "event_count": 450,
+                "last_updated": "2026-04-26 10:00:00"
+            },
+            {
+                "event_type": "email_address_created",
+                "event_count": 100,
+                "last_updated": "2026-04-26 10:00:00"
+            },
+            {
+                "event_type": "emails_fetched",
+                "event_count": 200,
+                "last_updated": "2026-04-26 10:00:00"
+            }
+        ]
+    },
+    "error": null
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| total_addresses | integer | Total number of created email addresses |
+| total_emails | integer | Total number of emails received |
+| total_webhooks | integer | Number of addresses with webhooks configured |
+| events | array | List of tracked events with counts |
+
+---
+
 ## SMTP Server
 
 The SMTP server receives emails sent to `@<MAIL_DOMAIN>` addresses.
@@ -300,7 +353,7 @@ The SMTP server receives emails sent to `@<MAIL_DOMAIN>` addresses.
 ### Connection
 
 ```
-SMTP Server: 143.110.178.78:25
+SMTP Server: <your-server-ip>:25
 ```
 
 ### SMTP Commands
@@ -310,7 +363,7 @@ Standard SMTP protocol:
 ```
 EHLO <hostname>
 MAIL FROM:<sender@example.com>
-RCPT TO:<recipient@xelio.me>
+RCPT TO:<recipient@mail.kreyon.in>
 DATA
 <email content>
 .
@@ -358,7 +411,7 @@ When an email is received and the address has a webhook configured, a POST reque
 {
     "version": 1,
     "otp": "123456",
-    "mail": "testuser@xelio.me"
+    "mail": "testuser@mail.kreyon.in"
 }
 ```
 
@@ -388,13 +441,13 @@ Webhooks are stored in the `user_config` table. They can be set when creating em
 ### Email Cleanup
 
 - **Schedule:** Daily at 2:00 AM UTC
-- **Action:** Deletes all emails older than 7 days
+- **Action:** Deletes all emails older than 1 day
 - **Runs in:** HTTP API service
 
 ### Old Mail Cleanup (SMTP)
 
 - **Schedule:** Every hour
-- **Action:** Deletes emails older than 7 days
+- **Action:** Deletes emails older than 1 day
 - **Runs in:** SMTP service
 
 ---
@@ -429,13 +482,14 @@ All HTTP API responses follow this structure:
 
 ---
 
-## Rate Limiting
+## Rate Limiting (DDoS Protection)
 
-- **Limit:** 5 requests per hour per IP address
-- **Status:** Currently disabled for local testing
+- **Limit:** 100 requests per second per IP address
+- **Burst:** Up to 150 requests
+- **Status:** Enabled
 - **Implementation:** tower-governor with SmartIpKeyExtractor
 
-Note: Rate limiting requires proxy headers (X-Forwarded-For, X-Real-IP) in production.
+Note: Rate limiting requires proxy headers (X-Forwarded-For, X-Real-IP) when behind a reverse proxy.
 
 ---
 
@@ -465,13 +519,13 @@ The API allows requests from:
 ## Email Address Format
 
 ```
-{username}@{MAIL_DOMAIN}
+{username}@mail.kreyon.in
 ```
 
 Examples:
-- `testuser@xelio.me`
-- `john-doe@xelio.me`
-- `user_123@xelio.me`
+- `testuser@mail.kreyon.in`
+- `john-doe@mail.kreyon.in`
+- `user_123@mail.kreyon.in`
 
 Username rules:
 - 3-32 characters
@@ -486,7 +540,7 @@ The `data` field contains raw email content in RFC 5322 format:
 
 ```
 From: sender@example.com
-To: user@xelio.me
+To: user@mail.kreyon.in
 Subject: Your Code
 MIME-Version: 1.0
 Content-Type: text/plain; charset=utf-8
@@ -513,14 +567,18 @@ const res = await fetch('http://localhost:3000/api/emails', {
     body: JSON.stringify({ username: 'myuser' })
 });
 const { data } = await res.json();
-// data.address = "myuser@xelio.me"
+// data.address = "myuser@mail.kreyon.in"
 
 // Fetch emails
-const emails = await fetch('http://localhost:3000/api/emails/myuser%40xelio.me');
+const emails = await fetch('http://localhost:3000/api/emails/myuser%40mail.kreyon.in');
 const { data: emailList } = await emails.json();
 
+// Get stats
+const stats = await fetch('http://localhost:3000/api/stats');
+const { data: statsData } = await stats.json();
+
 // Delete email
-await fetch('http://localhost:3000/api/emails/myuser%40xelio.me/123', {
+await fetch('http://localhost:3000/api/emails/myuser%40mail.kreyon.in/550e8400-e29b-41d4-a716-446655440000', {
     method: 'DELETE'
 });
 ```
@@ -537,10 +595,16 @@ curl -X POST http://localhost:3000/api/emails \
 curl http://localhost:3000/api/emails
 
 # Get emails for address
-curl http://localhost:3000/api/emails/testuser%40xelio.me
+curl http://localhost:3000/api/emails/testuser%40mail.kreyon.in
+
+# Get statistics
+curl http://localhost:3000/api/stats
 
 # Delete email address
-curl -X DELETE "http://localhost:3000/api/emails/testuser%40xelio.me"
+curl -X DELETE "http://localhost:3000/api/emails/testuser%40mail.kreyon.in"
+
+# Delete single email
+curl -X DELETE "http://localhost:3000/api/emails/testuser%40mail.kreyon.in/550e8400-e29b-41d4-a716-446655440000"
 ```
 
 ### Python
@@ -554,6 +618,10 @@ address = res.json()['data']['address']
 
 # Get emails
 emails = requests.get(f'http://localhost:3000/api/emails/{address}')
+
+# Get stats
+stats = requests.get('http://localhost:3000/api/stats')
+print(stats.json())
 ```
 
 ---
@@ -561,14 +629,14 @@ emails = requests.get(f'http://localhost:3000/api/emails/{address}')
 ## Troubleshooting
 
 ### SMTP Connection Refused
-- Verify port 25 is exposed in Coolify
+- Verify port 25 is exposed
 - Check if container is using `network_mode: host`
 - Verify firewall allows outbound port 25
 
 ### Database Connection Errors
 - Check DB_HOST, DB_USER, DB_PASSWORD environment variables
-- Verify Neon PostgreSQL is accessible
-- Check SSL mode (requires `require` for Neon)
+- Verify PostgreSQL is accessible
+- Check SSL mode (requires `require` for SSL connections)
 
 ### Emails Not Received
 - Check if sender MX records point to your SMTP server

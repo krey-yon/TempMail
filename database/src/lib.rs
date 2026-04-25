@@ -3,7 +3,7 @@ pub mod quota;
 pub mod webhooks;
 pub mod clear_old_mails;
 
-pub use database::{DatabaseClient, Email, MailRow};
+pub use database::{AnalyticsRow, DatabaseClient, Email, MailRow, TotalStats};
 pub use quota::AddressLimits;
 pub use webhooks::Webhooks;
 pub use clear_old_mails::clear_old_mails;
@@ -43,14 +43,14 @@ mod tests {
     #[test]
     fn test_mail_row_clone() {
         let row = MailRow {
-            id: 1,
+            id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             date: "2024-01-01".to_string(),
             sender: "sender@example.com".to_string(),
             recipients: "recipient@example.com".to_string(),
             data: "Email data".to_string(),
         };
         let cloned = row.clone();
-        assert_eq!(cloned.id, 1);
+        assert_eq!(cloned.id, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(cloned.sender, "sender@example.com");
     }
 
@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn test_mail_row_default() {
         let row = MailRow::default();
-        assert_eq!(row.id, 0);
+        assert!(row.id.is_empty());
         assert!(row.sender.is_empty());
     }
 }

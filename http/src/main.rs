@@ -13,7 +13,7 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use database::database::{DatabaseClient, EmailAddress, EmailAddressInfo, MailRow};
+use database::database::{AnalyticsRow, DatabaseClient, EmailAddress, EmailAddressInfo, MailRow};
 use dotenv::dotenv;
 use std::sync::Arc;
 use tower_governor::{
@@ -52,6 +52,8 @@ async fn create_email(
     match db.create_email_address(&validated_username).await {
         Ok(email_address) => {
             info!("Email address created: {}", email_address.address);
+            // Track analytics
+            let _ = db.increment_analytics("email_address_created").await;
             (
                 StatusCode::CREATED,
                 Json(ApiResponse::success(email_address)),
@@ -60,6 +62,8 @@ async fn create_email(
         }
         Err(e) if e.to_string().contains("already exists") => {
             warn!("Duplicate email address attempt: {}", validated_username);
+            // Track failed attempt
+            let _ = db.increment_analytics("duplicate_address_attempt").await;
             (
                 StatusCode::CONFLICT,
                 Json(ApiResponse::<EmailAddress>::error(
@@ -154,12 +158,51 @@ async fn list_emails(State(db): State<Arc<DatabaseClient>>) -> Response {
     }
 }
 
+#[derive(serde::Serialize)]
+struct StatsResponse {
+    total_addresses: i64,
+    total_emails: i64,
+    total_webhooks: i64,
+    events: Vec<AnalyticsRow>,
+}
+
+async fn get_stats(State(db): State<Arc<DatabaseClient>>) -> Response {
+    info!("Getting statistics");
+
+    match db.get_total_stats().await {
+        Ok(stats) => {
+            let events = db.get_analytics().await.unwrap_or_default();
+            let response = StatsResponse {
+                total_addresses: stats.total_email_addresses,
+                total_emails: stats.total_emails_received,
+                total_webhooks: stats.total_webhooks_configured,
+                events,
+            };
+            (StatusCode::OK, Json(ApiResponse::success(response))).into_response()
+        }
+        Err(e) => {
+            error!("Failed to get stats: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<StatsResponse>::error(
+                    "Internal server error".to_string(),
+                )),
+            )
+                .into_response()
+        }
+    }
+}
+
 async fn get_emails(
     Path(address): Path<String>,
     State(db): State<Arc<DatabaseClient>>,
 ) -> Json<ApiResponse<Vec<MailRow>>> {
     match db.get_mails_by_recipient(&address).await {
-        Ok(mails) => Json(ApiResponse::success(mails)),
+        Ok(mails) => {
+            // Track email fetch
+            let _ = db.increment_analytics("emails_fetched").await;
+            Json(ApiResponse::success(mails))
+        }
         Err(e) => {
             error!("Failed to get emails: {}", e);
             Json(ApiResponse::error(e.to_string()))
@@ -168,10 +211,10 @@ async fn get_emails(
 }
 
 async fn get_email(
-    Path((address, id)): Path<(String, i64)>,
+    Path((address, id)): Path<(String, String)>,
     State(db): State<Arc<DatabaseClient>>,
 ) -> Json<ApiResponse<MailRow>> {
-    match db.get_mail_by_id(id).await {
+    match db.get_mail_by_id(&id).await {
         Ok(Some(mail)) => {
             if mail.recipients == address {
                 Json(ApiResponse::success(mail))
@@ -190,10 +233,10 @@ async fn get_email(
 }
 
 async fn delete_email(
-    Path((address, id)): Path<(String, i64)>,
+    Path((address, id)): Path<(String, String)>,
     State(db): State<Arc<DatabaseClient>>,
 ) -> Json<ApiResponse<()>> {
-    match db.get_mail_by_id(id).await {
+    match db.get_mail_by_id(&id).await {
         Ok(Some(mail)) => {
             if mail.recipients != address {
                 return Json(ApiResponse::error(
@@ -210,7 +253,7 @@ async fn delete_email(
         }
     }
 
-    match db.delete_mail(id).await {
+    match db.delete_mail(&id).await {
         Ok(_) => Json(ApiResponse::success(())),
         Err(e) => {
             error!("Failed to delete email: {}", e);
@@ -231,21 +274,19 @@ async fn main() {
         error!("Failed to start cleanup scheduler: {}", e);
     }
 
-    // Rate limiter disabled for local testing
-    // Configure rate limiter: 5 requests per hour per IP
+    // Configure rate limiter: 100 requests per minute per IP (DDoS protection)
     // Note: SmartIpKeyExtractor requires proxy headers (X-Forwarded-For, X-Real-IP)
-    // For local development without proxy, this may fail
-    let _governor_conf = Arc::new(
+    let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(3600) // 1 hour window
-            .burst_size(5)    // 5 requests max
+            .per_second(100) // 100 requests per second
+            .burst_size(150) // Allow burst of up to 150 requests
             .key_extractor(SmartIpKeyExtractor)
             .finish()
             .unwrap(),
     );
 
-    let _governor_layer = GovernorLayer {
-        config: _governor_conf,
+    let governor_layer = GovernorLayer {
+        config: governor_conf,
     };
 
     let cors = CorsLayer::new()
@@ -266,8 +307,8 @@ async fn main() {
         .route("/api/emails/:address", get(get_emails))
         .route("/api/emails/:address/:id", get(get_email))
         .route("/api/emails/:address/:id", delete(delete_email))
-        // Rate limiter disabled for local testing (requires proxy headers)
-        // .layer(governor_layer)
+        .route("/api/stats", get(get_stats))
+        .layer(governor_layer)
         .with_state(db)
         .layer(cors);
 
