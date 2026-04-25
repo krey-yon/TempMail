@@ -73,9 +73,12 @@ impl DatabaseClient {
 
         // Initialize database schema
         let client = pool.get().await?;
-        let sql: &str = r#"
-            CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
+        // Create extension separately (ignore errors if already exists)
+        let _ = client.execute("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\"", &[]).await;
+
+        // Create tables
+        let sql: &str = r#"
             CREATE TABLE IF NOT EXISTS mail (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 date TEXT,
@@ -118,6 +121,8 @@ impl DatabaseClient {
                         ON DELETE CASCADE
                         ON UPDATE CASCADE;
                 END IF;
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK constraint may already exist: %', SQLERRM;
             END;
             $$;
 
@@ -130,7 +135,7 @@ impl DatabaseClient {
 
             CREATE TABLE IF NOT EXISTS analytics (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                event_type TEXT NOT NULL,
+                event_type TEXT NOT NULL UNIQUE,
                 event_count BIGINT NOT NULL DEFAULT 0,
                 last_updated TEXT NOT NULL DEFAULT (now()::text)
             );
