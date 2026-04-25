@@ -150,10 +150,15 @@ impl DatabaseClient {
                         .format("%Y-%m-%d %H:%M:%S%.3f")
                         .to_string();
 
+                    // Normalize recipient: strip angle brackets if present
+                    let normalized_recipient = data.recipients[0]
+                        .trim_start_matches('<')
+                        .trim_end_matches('>');
+
                     match client
                         .execute(
                             sql,
-                            &[&date, &data.sender, &data.recipients[0], &data.content],
+                            &[&date, &data.sender, &normalized_recipient, &data.content],
                         )
                         .await
                     {
