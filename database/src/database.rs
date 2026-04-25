@@ -422,6 +422,13 @@ impl DatabaseClient {
 
     pub async fn delete_email_address(&self, address: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
+
+        // Delete from quota first (due to foreign key constraint)
+        let sql_quota = "DELETE FROM quota WHERE address = $1";
+        if let Err(e) = client.execute(sql_quota, &[&address]).await {
+            error!("Failed to delete quota for {}: {}", address, e);
+        }
+
         // Delete from email_addresses
         let sql = "DELETE FROM email_addresses WHERE address = $1";
         match client.execute(sql, &[&address]).await {
