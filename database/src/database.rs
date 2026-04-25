@@ -208,9 +208,10 @@ impl DatabaseClient {
         recipient: &str,
     ) -> Result<Vec<MailRow>, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
+        let normalized_recipient = recipient.trim_start_matches('<').trim_end_matches('>');
         let sql =
             "SELECT id, date, sender, recipients, data FROM mail WHERE recipients = $1 ORDER BY date DESC";
-        match client.query(sql, &[&recipient]).await {
+        match client.query(sql, &[&normalized_recipient]).await {
             Ok(rows) => {
                 let mails: Vec<MailRow> = rows
                     .into_iter()

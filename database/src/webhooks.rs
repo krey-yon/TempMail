@@ -15,6 +15,11 @@ impl Webhooks {
         match client.query_one(sql, &[&mail]).await {
             Ok(row) => Ok(row.get(0)),
             Err(e) if e.to_string().contains("no rows returned") => Ok(None),
+            Err(e) if e.to_string().contains("unexpected number of rows") => {
+                // Multiple rows exist, just return None
+                error!("Multiple webhook entries found for {}, returning None", mail);
+                Ok(None)
+            }
             Err(e) => {
                 error!("Failed to get webhook address: {}", e);
                 Err(Box::new(e))
