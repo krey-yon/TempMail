@@ -7,7 +7,7 @@ TempMail is a temporary email service with two components:
 - **SMTP Server** (port 25) - Email receiving server
 
 Base URL:
-- Production: `https://void.kreyon.in`
+- Production: `https://www.xelio.me`
 - Local: `http://localhost:3000`
 
 ---
@@ -496,7 +496,7 @@ Note: Rate limiting requires proxy headers (X-Forwarded-For, X-Real-IP) when beh
 ## CORS
 
 The API allows requests from:
-- `https://void.kreyon.in`
+- `https://www.xelio.me`
 
 ---
 

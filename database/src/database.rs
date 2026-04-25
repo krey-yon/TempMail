@@ -372,7 +372,7 @@ impl DatabaseClient {
     // ============== EMAIL ADDRESS OPERATIONS (for HTTP API) ==============
 
     pub async fn create_email_address(&self, username: &str) -> Result<EmailAddress, Box<dyn Error + Send + Sync>> {
-        let domain = env::var("MAIL_DOMAIN").unwrap_or_else(|_| "mail.kreyon.in".to_string());
+        let domain = env::var("MAIL_DOMAIN").unwrap_or_else(|_| "xelio.me".to_string());
         let address = format!("{}@{}", username, domain);
         let created_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
 

@@ -47,7 +47,7 @@ services:
       - DB_NAME=${DB_NAME:?DB_NAME required}
       - DB_PORT=${DB_PORT:-5432}
       - DB_SSLMODE=${DB_SSLMODE:-require}
-      - MAIL_DOMAIN=${MAIL_DOMAIN:-mail.kreyon.in}
+      - MAIL_DOMAIN=${MAIL_DOMAIN:-xelio.me}
       - SMTP_PORT=${SMTP_PORT:-25}
       - RUST_LOG=${RUST_LOG:-info}
     ports:
