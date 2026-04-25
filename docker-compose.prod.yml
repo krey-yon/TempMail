@@ -38,6 +38,7 @@ services:
       context: .
       dockerfile: Dockerfile.smtp
     container_name: tempmail-smtp
+    network_mode: bridge
     restart: always
     environment:
       - DB_HOST=${DB_HOST:?DB_HOST required}
