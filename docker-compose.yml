@@ -13,6 +13,7 @@ services:
       DB_NAME: neondb
       DB_PORT: "5432"
       DB_SSLMODE: require
+      MAIL_DOMAIN: xelio.me
       RUST_LOG: info
     ports:
       - "25:25"
@@ -39,6 +40,7 @@ services:
       DB_NAME: neondb
       DB_PORT: "5432"
       DB_SSLMODE: require
+      MAIL_DOMAIN: xelio.me
       RUST_LOG: info
     ports:
       - "3000:3000"
