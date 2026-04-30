@@ -27,6 +27,7 @@ pub struct HandleCurrentState {
     current_state: CurrentStates,
     greeting_message: String,
     max_email_size: usize,
+    server_domain: String,
 }
 
 impl HandleCurrentState {
@@ -43,6 +44,7 @@ impl HandleCurrentState {
             current_state: CurrentStates::Initial,
             greeting_message,
             max_email_size: MAX_EMAIL_SIZE,
+            server_domain: server_domain.to_string(),
         }
     }
 
@@ -122,6 +124,13 @@ impl HandleCurrentState {
 
                 if !is_email_valid(receiver) {
                     tracing::error!("ERROR: Invalid email: {}", receiver);
+                    return Err(SmtpResponseError::new(&SmtpErrorCode::MailboxUnavailable));
+                }
+
+                let receiver_clean = receiver.trim_start_matches('<').trim_end_matches('>');
+                let receiver_domain = receiver_clean.split('@').nth(1).unwrap_or("");
+                if receiver_domain != self.server_domain {
+                    tracing::error!("ERROR: Relay denied for domain: {}", receiver_domain);
                     return Err(SmtpResponseError::new(&SmtpErrorCode::MailboxUnavailable));
                 }
 
