@@ -6,15 +6,8 @@ services:
       dockerfile: Dockerfile.smtp
     container_name: tempmail-smtp
     restart: unless-stopped
-    environment:
-      DB_HOST: YOUR_DB_HOST
-      DB_USER: neondb_owner
-      DB_PASSWORD: YOUR_DB_PASSWORD
-      DB_NAME: neondb
-      DB_PORT: "5432"
-      DB_SSLMODE: require
-      MAIL_DOMAIN: xelio.me
-      RUST_LOG: info
+    env_file:
+      - .env
     ports:
       - "25:25"
     cap_add:
@@ -33,15 +26,8 @@ services:
       dockerfile: Dockerfile.http
     container_name: tempmail-http
     restart: unless-stopped
-    environment:
-      DB_HOST: YOUR_DB_HOST
-      DB_USER: neondb_owner
-      DB_PASSWORD: YOUR_DB_PASSWORD
-      DB_NAME: neondb
-      DB_PORT: "5432"
-      DB_SSLMODE: require
-      MAIL_DOMAIN: xelio.me
-      RUST_LOG: info
+    env_file:
+      - .env
     ports:
       - "3000:3000"
     healthcheck:
