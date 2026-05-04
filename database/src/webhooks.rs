@@ -33,7 +33,8 @@ impl Webhooks {
         webhook_url: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let client = db.pool.get().await?;
-        let address = mail.split('@').next().unwrap_or(mail);
+        // Store the full email address so the FK user_config.address -> quota(address) works
+        let address = mail;
         let sql = "INSERT INTO user_config (mail, address, web_hook_address) VALUES ($1, $2, $3) ON CONFLICT (mail) DO UPDATE SET web_hook_address = $3";
         match client.execute(sql, &[&mail, &address, &webhook_url]).await {
             Ok(_) => {

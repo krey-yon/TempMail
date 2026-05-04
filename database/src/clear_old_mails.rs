@@ -16,6 +16,11 @@ pub fn clear_old_mails(db: Arc<DatabaseClient>, interval: Duration) {
                 Ok(count) => info!("Deleted {} old emails", count),
                 Err(e) => error!("Cleanup failed: {}", e),
             }
+
+            match db.delete_old_email_addresses().await {
+                Ok(count) => info!("Deleted {} old email addresses", count),
+                Err(e) => error!("Address cleanup failed: {}", e),
+            }
         }
     });
 }

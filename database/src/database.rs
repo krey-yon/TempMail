@@ -380,111 +380,83 @@ impl DatabaseClient {
         let domain = env::var("MAIL_DOMAIN").unwrap_or_else(|_| "xelio.me".to_string());
         let address = format!("{}@{}", username, domain);
         let created_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-
         let default_quota_limit: i32 = 1000;
-        let mut retry_count = 0;
-        let max_retries = 3;
 
-        // Create or restore quota entry with retry
-        while retry_count < max_retries {
-            match self.pool.get().await {
-                Ok(client) => {
-                    // Use DO UPDATE to restore deleted quota entries
-                    let sql = "INSERT INTO quota (address, quota_limit, completed) VALUES ($1, $2, 0) ON CONFLICT (address) DO UPDATE SET quota_limit = EXCLUDED.quota_limit, completed = 0";
-                    match client.execute(sql, &[&address, &default_quota_limit]).await {
-                        Ok(_) => break,
-                        Err(e) if retry_count < max_retries - 1 => {
-                            error!("Failed to create quota for {} (attempt {}): {}", address, retry_count + 1, e);
-                            retry_count += 1;
-                            tokio::time::sleep(tokio::time::Duration::from_millis(100 * (retry_count as u64))).await;
-                        }
-                        Err(e) => {
-                            error!("Failed to create quota for {}: {}", address, e);
-                            let err_str = e.to_string();
-                            if err_str.contains("duplicate key") {
-                                return Err(format!("Email address '{}' already exists in quota system", address).into());
-                            }
-                            return Err(format!("Database error creating quota: {}", e).into());
-                        }
-                    }
-                }
-                Err(e) if retry_count < max_retries - 1 => {
-                    error!("Failed to get connection (attempt {}): {}", retry_count + 1, e);
-                    retry_count += 1;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100 * (retry_count as u64))).await;
-                }
-                Err(e) => {
-                    error!("Failed to get connection: {}", e);
-                    return Err("Database connection failed. Please check if the database server is running.".into());
-                }
-            }
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+
+        // Insert or restore quota entry
+        let quota_sql = "INSERT INTO quota (address, quota_limit, completed) VALUES ($1, $2, 0) ON CONFLICT (address) DO UPDATE SET quota_limit = EXCLUDED.quota_limit, completed = 0";
+        tx.execute(quota_sql, &[&address, &default_quota_limit]).await?;
+
+        // Insert email address
+        let addr_sql = "INSERT INTO email_addresses (address, created_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING";
+        let rows = tx.execute(addr_sql, &[&address, &created_at]).await?;
+
+        if rows == 0 {
+            // Address already exists — rollback the quota update to keep state clean
+            tx.rollback().await?;
+            return Err(format!("Username '{}' is already taken. Please choose a different username.", username).into());
         }
 
-        retry_count = 0;
-        while retry_count < max_retries {
-            match self.pool.get().await {
-                Ok(client) => {
-                    // Use DO NOTHING for true "create only if not exists" semantics
-                    let sql = "INSERT INTO email_addresses (address, created_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING";
-                    match client.execute(sql, &[&address, &created_at]).await {
-                        Ok(rows) => {
-                            if rows == 0 {
-                                // Conflict - address already exists
-                                return Err(format!("Username '{}' is already taken. Please choose a different username.", username).into());
-                            }
-                            return Ok(EmailAddress {
-                                address: address.clone(),
-                                created_at: Some(created_at),
-                            });
-                        }
-                        Err(e) if retry_count < max_retries - 1 => {
-                            error!("Failed to create email address (attempt {}): {}", retry_count + 1, e);
-                            retry_count += 1;
-                            tokio::time::sleep(tokio::time::Duration::from_millis(100 * (retry_count as u64))).await;
-                            continue;
-                        }
-                        Err(e) => {
-                            error!("Failed to create email address: {}", e);
-                            let err_str = e.to_string();
-                            if err_str.contains("duplicate key") {
-                                return Err(format!("Username '{}' is already taken. Please choose a different username.", username).into());
-                            }
-                            return Err(format!("Database error: {}", e).into());
-                        }
-                    }
-                }
-                Err(e) if retry_count < max_retries - 1 => {
-                    error!("Failed to get connection (attempt {}): {}", retry_count + 1, e);
-                    retry_count += 1;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100 * (retry_count as u64))).await;
-                }
-                Err(e) => {
-                    error!("Failed to get connection: {}", e);
-                    return Err("Database connection failed. Please check if the database server is running.".into());
-                }
-            }
-        }
-        Err("Failed to create email address after multiple retries. Please try again.".into())
+        tx.commit().await?;
+        Ok(EmailAddress {
+            address: address.clone(),
+            created_at: Some(created_at),
+        })
     }
 
     pub async fn delete_email_address(&self, address: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        let client = self.pool.get().await?;
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
 
-        // Delete from quota first (due to foreign key constraint)
-        let sql_quota = "DELETE FROM quota WHERE address = $1";
-        if let Err(e) = client.execute(sql_quota, &[&address]).await {
-            error!("Failed to delete quota for {}: {}", address, e);
+        // Cascade delete all associated data
+        let _ = tx.execute("DELETE FROM mail WHERE recipients = $1", &[&address]).await;
+        let _ = tx.execute("DELETE FROM user_config WHERE mail = $1", &[&address]).await;
+        let _ = tx.execute("DELETE FROM quota WHERE address = $1", &[&address]).await;
+
+        let rows = tx.execute("DELETE FROM email_addresses WHERE address = $1", &[&address]).await?;
+
+        tx.commit().await?;
+
+        if rows > 0 {
+            info!("Email address cascade deleted: {}", address);
         }
 
-        // Delete from email_addresses
-        let sql = "DELETE FROM email_addresses WHERE address = $1";
-        match client.execute(sql, &[&address]).await {
-            Ok(rows) => Ok(rows > 0),
-            Err(e) => {
-                error!("Failed to delete email address: {}", e);
-                Err(Box::new(e))
+        Ok(rows > 0)
+    }
+
+    pub async fn delete_old_email_addresses(&self) -> Result<u64, Box<dyn Error + Send + Sync>> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+
+        let now = chrono::Utc::now();
+        let a_day_ago = now - chrono::Duration::days(1);
+        let a_day_ago = a_day_ago.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+
+        let rows = tx
+            .query("SELECT address FROM email_addresses WHERE created_at < $1", &[&a_day_ago])
+            .await?;
+        let mut deleted_count = 0u64;
+
+        for row in rows {
+            let address: String = row.get(0);
+
+            let _ = tx.execute("DELETE FROM mail WHERE recipients = $1", &[&address]).await;
+            let _ = tx.execute("DELETE FROM user_config WHERE mail = $1", &[&address]).await;
+            let _ = tx.execute("DELETE FROM quota WHERE address = $1", &[&address]).await;
+            let result = tx
+                .execute("DELETE FROM email_addresses WHERE address = $1", &[&address])
+                .await?;
+
+            if result > 0 {
+                deleted_count += 1;
             }
         }
+
+        tx.commit().await?;
+        info!("Deleted {} old email addresses", deleted_count);
+        Ok(deleted_count)
     }
 
     pub async fn list_email_addresses(&self) -> Result<Vec<EmailAddressInfo>, Box<dyn Error + Send + Sync>> {
