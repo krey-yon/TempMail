@@ -3,7 +3,7 @@ pub mod quota;
 pub mod webhooks;
 pub mod clear_old_mails;
 
-pub use database::{AnalyticsRow, DatabaseClient, Email, MailRow, TotalStats};
+pub use database::{AnalyticsRow, DatabaseClient, Email, EmailRegistryEntry, MailRow, TotalStats};
 pub use quota::AddressLimits;
 pub use webhooks::Webhooks;
 pub use clear_old_mails::clear_old_mails;

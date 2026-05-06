@@ -13,7 +13,7 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use database::database::{AnalyticsRow, DatabaseClient, EmailAddress, EmailAddressInfo, MailRow};
+use database::database::{AnalyticsRow, DatabaseClient, EmailAddress, EmailAddressInfo, EmailRegistryEntry, MailRow};
 use dotenv::dotenv;
 use std::sync::Arc;
 use tower_governor::{
@@ -147,6 +147,27 @@ async fn list_emails(State(db): State<Arc<DatabaseClient>>) -> Response {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiResponse::<Vec<EmailAddressInfo>>::error(
+                    "Internal server error".to_string(),
+                )),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn list_registry(State(db): State<Arc<DatabaseClient>>) -> Response {
+    info!("Listing registered usernames");
+
+    match db.list_registered_usernames().await {
+        Ok(entries) => {
+            info!("Found {} registered usernames", entries.len());
+            (StatusCode::OK, Json(ApiResponse::success(entries))).into_response()
+        }
+        Err(e) => {
+            error!("Failed to list registered usernames: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<Vec<EmailRegistryEntry>>::error(
                     "Internal server error".to_string(),
                 )),
             )
@@ -305,6 +326,7 @@ async fn main() {
         .route("/api/emails/:address/:id", get(get_email))
         .route("/api/emails/:address/:id", delete(delete_email))
         .route("/api/stats", get(get_stats))
+        .route("/api/admin/registry", get(list_registry))
         .layer(governor_layer)
         .with_state(db)
         .layer(cors);

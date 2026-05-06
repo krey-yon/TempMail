@@ -41,6 +41,12 @@ pub struct EmailAddressInfo {
     pub email_count: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailRegistryEntry {
+    pub username: String,
+    pub created_at: Option<String>,
+}
+
 impl DatabaseClient {
     pub async fn connect() -> Result<Self, Box<dyn Error + Send + Sync>> {
         let mut pg_config = tokio_postgres::Config::new();
@@ -140,6 +146,13 @@ impl DatabaseClient {
                 last_updated TEXT NOT NULL DEFAULT (now()::text)
             );
             CREATE INDEX IF NOT EXISTS analytics_event_type_idx ON analytics(event_type);
+
+            CREATE TABLE IF NOT EXISTS email_registry (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                username TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT (now()::text)
+            );
+            CREATE INDEX IF NOT EXISTS email_registry_username_idx ON email_registry(username);
         "#;
 
         if let Err(e) = client.batch_execute(sql).await {
@@ -385,16 +398,26 @@ impl DatabaseClient {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
 
-        // Insert or restore quota entry
+        // 1. Register username permanently — this is the global uniqueness gatekeeper
+        let registry_sql = "INSERT INTO email_registry (username, created_at) VALUES ($1, $2) ON CONFLICT (username) DO NOTHING";
+        let registry_rows = tx.execute(registry_sql, &[&username, &created_at]).await?;
+
+        if registry_rows == 0 {
+            // Username already exists globally — rollback and return error
+            tx.rollback().await?;
+            return Err(format!("Username '{}' is already taken. Please choose a different username.", username).into());
+        }
+
+        // 2. Insert or restore quota entry
         let quota_sql = "INSERT INTO quota (address, quota_limit, completed) VALUES ($1, $2, 0) ON CONFLICT (address) DO UPDATE SET quota_limit = EXCLUDED.quota_limit, completed = 0";
         tx.execute(quota_sql, &[&address, &default_quota_limit]).await?;
 
-        // Insert email address
+        // 3. Insert email address (active)
         let addr_sql = "INSERT INTO email_addresses (address, created_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING";
         let rows = tx.execute(addr_sql, &[&address, &created_at]).await?;
 
         if rows == 0 {
-            // Address already exists — rollback the quota update to keep state clean
+            // Address already exists in active table — rollback to keep state clean
             tx.rollback().await?;
             return Err(format!("Username '{}' is already taken. Please choose a different username.", username).into());
         }
@@ -483,6 +506,27 @@ impl DatabaseClient {
             }
             Err(e) => {
                 error!("Failed to list email addresses: {}", e);
+                Err(Box::new(e))
+            }
+        }
+    }
+
+    pub async fn list_registered_usernames(&self) -> Result<Vec<EmailRegistryEntry>, Box<dyn Error + Send + Sync>> {
+        let client = self.pool.get().await?;
+        let sql = "SELECT username, created_at FROM email_registry ORDER BY created_at DESC";
+        match client.query(sql, &[]).await {
+            Ok(rows) => {
+                let entries: Vec<EmailRegistryEntry> = rows
+                    .into_iter()
+                    .map(|row| EmailRegistryEntry {
+                        username: row.get(0),
+                        created_at: row.get(1),
+                    })
+                    .collect();
+                Ok(entries)
+            }
+            Err(e) => {
+                error!("Failed to list registered usernames: {}", e);
                 Err(Box::new(e))
             }
         }
