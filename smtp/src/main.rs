@@ -3,7 +3,7 @@ use smtp::start_smtp_server;
 use tracing::error;
 use std::env;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 

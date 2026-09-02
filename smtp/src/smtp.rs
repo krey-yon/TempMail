@@ -6,7 +6,7 @@ use database::webhooks::Webhooks;
 use tracing::{error, info};
 
 use crate::{
-    errors::{SmtpErrorCode, SmtpResponseError}, is_email_valid, server::CLOSING_CONNECTION, types::{CurrentStates, Email, SMTPResult}, webhook::{extract_otp, send_webhook, Payload}
+    errors::{SmtpErrorCode, SmtpResponseError}, is_email_valid, server::CLOSING_CONNECTION, types::{CurrentStates, Email, SMTPResult, SmtpReply}, webhook::{extract_otp, send_webhook, Payload}
 };
 
 const MAX_EMAIL_SIZE: usize = 10_485_760;
@@ -52,7 +52,7 @@ impl HandleCurrentState {
         &mut self,
         client_message: &str,
         db: &Arc<DatabaseClient>
-    ) -> SMTPResult<'a, &[u8]> {
+    ) -> SMTPResult<'a, SmtpReply<'_>> {
         let message = client_message.trim();
 
         if message.is_empty() {
@@ -70,24 +70,24 @@ impl HandleCurrentState {
         match (command.as_str(), previous_state) {
             ("ehlo", CurrentStates::Initial) => {
                 self.current_state = CurrentStates::Greeted;
-                Ok(self.greeting_message.as_bytes())
+                Ok(SmtpReply::none(self.greeting_message.as_bytes()))
             },
             ("helo", CurrentStates::Initial) => {
                 self.current_state = CurrentStates::Greeted;
-                Ok(self.greeting_message.as_bytes())
+                Ok(SmtpReply::none(self.greeting_message.as_bytes()))
             },
             ("noop", _) | ("help", _) | ("info", _) | ("vrfy", _) | ("expn", _) => {
                 tracing::warn!("RECIEVED: Unhandled commands");
-                Ok(SUCCESS_RESPONSE)
+                Ok(SmtpReply::none(SUCCESS_RESPONSE))
             }
             ("rset", _) => {
                 tracing::warn!("RECIEVED: Reset");
                 self.current_state = CurrentStates::Initial;
-                Ok(SUCCESS_RESPONSE)
+                Ok(SmtpReply::none(SUCCESS_RESPONSE))
             }
             ("auth", _) => {
                 tracing::trace!("RECIEVED: auth");
-                Ok(AUTH_OK)
+                Ok(SmtpReply::none(AUTH_OK))
             }
             ("mail", CurrentStates::Greeted) => {
                 let sender = message_parts
@@ -105,7 +105,7 @@ impl HandleCurrentState {
                     sender: sender.to_string(),
                     ..Default::default()
                 });
-                Ok(SUCCESS_RESPONSE)
+                Ok(SmtpReply::none(SUCCESS_RESPONSE))
             }
             ("rcpt", CurrentStates::AwaitingRecipient(mut email)) => {
                 if email.recipients.len() >= MAX_RECIPIENT_COUNT {
@@ -137,7 +137,7 @@ impl HandleCurrentState {
                 email.recipients.push(receiver.to_string());
                 tracing::trace!("RECIEVED: RCPT TO: {}", receiver);
                 self.current_state = CurrentStates::AwaitingRecipient(email);
-                Ok(SUCCESS_RESPONSE)
+                Ok(SmtpReply::none(SUCCESS_RESPONSE))
             }
             ("data", CurrentStates::AwaitingRecipient(email)) => {
                 if email.recipients.is_empty() {
@@ -145,7 +145,7 @@ impl HandleCurrentState {
                     return Err(SmtpResponseError::new(&SmtpErrorCode::TransactionFailed));
                 }
                 self.current_state = CurrentStates::AwaitingData(email);
-                Ok(DATA_READY_PROMPT)
+                Ok(SmtpReply::none(DATA_READY_PROMPT))
             }
             ("quit", state) => match state {
                  CurrentStates::DataReceived(email) => {
@@ -205,11 +205,11 @@ impl HandleCurrentState {
                         }
                     }
 
-                    Ok(CLOSING_CONNECTION)
+                    Ok(SmtpReply::closing(CLOSING_CONNECTION))
                 }
                 _ => {
                     tracing::warn!("QUIT before DATA completed, discarding mail");
-                    Ok(CLOSING_CONNECTION)
+                    Ok(SmtpReply::closing(CLOSING_CONNECTION))
                 }
             },
             (_, CurrentStates::AwaitingData(mut email)) => {
@@ -225,10 +225,10 @@ impl HandleCurrentState {
                 let response =
                     if email.content.ends_with("\n.\n") || email.content.ends_with("\r\n.\r\n") {
                         self.current_state = CurrentStates::DataReceived(take(&mut email));
-                        SUCCESS_RESPONSE
+                        SmtpReply::data_accepted(SUCCESS_RESPONSE)
                     } else {
                         self.current_state = CurrentStates::AwaitingData(take(&mut email));
-                        b""
+                        SmtpReply::none(b"")
                     };
 
                 Ok(response)

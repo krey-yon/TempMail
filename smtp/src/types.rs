@@ -19,6 +19,42 @@ pub enum CurrentStates {
 
 pub type SMTPResult<'a, T> = Result<T, SmtpResponseError<'a>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmtpReplyEvent {
+    None,
+    DataAccepted,
+    Closing,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SmtpReply<'a> {
+    pub bytes: &'a [u8],
+    pub event: SmtpReplyEvent,
+}
+
+impl<'a> SmtpReply<'a> {
+    pub fn none(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            event: SmtpReplyEvent::None,
+        }
+    }
+
+    pub fn data_accepted(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            event: SmtpReplyEvent::DataAccepted,
+        }
+    }
+
+    pub fn closing(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            event: SmtpReplyEvent::Closing,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

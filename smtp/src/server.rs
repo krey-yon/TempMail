@@ -1,13 +1,22 @@
-use std::{error::Error, sync::Arc, time::Duration};
+use std::{
+    error::Error,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::timeout,
 };
-use tracing::{Level, error};
+use tracing::error;
 use database::database::DatabaseClient;
 
-use crate::{errors::SmtpErrorCode, smtp::HandleCurrentState};
+use crate::{
+    errors::SmtpErrorCode,
+    metrics::SmtpMetrics,
+    smtp::HandleCurrentState,
+    types::SmtpReplyEvent,
+};
 
 const INITIAL_GREETING: &'static [u8] = b"220 Temp Mail Service Ready\n";
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -17,6 +26,8 @@ pub struct Server {
     connection: tokio::net::TcpStream,
     state_handler: HandleCurrentState,
     db: Arc<DatabaseClient>,
+    metrics: Arc<SmtpMetrics>,
+    greeting_start: Instant,
 }
 
 impl Server {
@@ -24,18 +35,23 @@ impl Server {
         server_domain: impl AsRef<str>,
         connection: tokio::net::TcpStream,
         db: Arc<DatabaseClient>,
+        metrics: Arc<SmtpMetrics>,
+        greeting_start: Instant,
     ) -> Self {
         Self {
             connection,
             state_handler: HandleCurrentState::new(server_domain),
             db,
+            metrics,
+            greeting_start,
         }
     }
 
-    pub async fn connection(mut self) -> Result<(), Box<dyn Error>> {
-        let span = tracing::span!(Level::INFO, "MAIL");
-        let _enter = span.enter();
+    #[tracing::instrument(name = "MAIL", skip_all)]
+    pub async fn connection(mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let _inflight = self.metrics.session();
         self.connection.write_all(INITIAL_GREETING).await?;
+        self.metrics.record_greeting(self.greeting_start.elapsed());
         tracing::info!("Greeted");
         let mut buffer: Vec<u8> = vec![0; 65536];
         let db = self.db.clone();
@@ -47,6 +63,7 @@ impl Server {
                     break;
                 }
                 Ok(Ok(bytes)) => {
+                    let command_start = Instant::now();
                     let message = match std::str::from_utf8(&buffer[0..bytes]) {
                         Ok(a) => a,
                         Err(e) => {
@@ -56,13 +73,19 @@ impl Server {
                     };
 
                     match self.state_handler.process_smtp_command(message, &db).await {
-                        Ok(response) => {
-                            if response  != b"" {
-                                self.connection.write_all(response).await?;
+                        Ok(reply) => {
+                            if !reply.bytes.is_empty() {
+                                self.connection.write_all(reply.bytes).await?;
                             }
-                            if response == CLOSING_CONNECTION {
-                                tracing::warn!("Closing connection!");
-                                break;
+                            match reply.event {
+                                SmtpReplyEvent::DataAccepted => {
+                                    self.metrics.record_data_accept(command_start.elapsed());
+                                }
+                                SmtpReplyEvent::Closing => {
+                                    tracing::warn!("Closing connection!");
+                                    break;
+                                }
+                                SmtpReplyEvent::None => {}
                             }
                         }
                         Err(err) => {
