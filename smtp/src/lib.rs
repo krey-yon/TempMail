@@ -1,39 +1,56 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use tokio::{net::TcpListener, time::timeout};
 use tracing::info;
 use database::database::DatabaseClient;
 use database::clear_old_mails::clear_old_mails;
 
+use crate::metrics::SmtpMetrics;
 use crate::server::Server;
 mod errors;
 pub mod server;
 mod smtp;
 mod types;
 mod webhook;
+mod metrics;
 
 pub async fn start_smtp_server(addr: SocketAddr, domain: String) {
     let listener = TcpListener::bind(addr).await.unwrap();
     let domain = Arc::new(domain);
     let db = Arc::new(DatabaseClient::connect().await.unwrap());
+    let metrics = Arc::new(SmtpMetrics::new());
 
     // Start background task to clear old mails every hour
     clear_old_mails(db.clone(), Duration::from_secs(3600));
-
-    let local_set = tokio::task::LocalSet::new();
+    metrics::spawn_listener(metrics.clone());
 
     info!("Server started on Port: {}", addr);
 
     loop {
-        let (stream, _addr) = listener.accept().await.unwrap();
+        let (stream, _addr) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(e) => {
+                tracing::error!("SMTP accept failed: {e}");
+                continue;
+            }
+        };
+        let greeting_start = Instant::now();
+        if let Err(e) = stream.set_nodelay(true) {
+            tracing::error!("TCP_NODELAY failed: {e}");
+        }
         let domain = domain.clone();
         let db = db.clone();
+        let metrics = metrics.clone();
 
-        local_set.run_until(async move {
+        tokio::spawn(async move {
             tracing::info!("Ping received on SMTP Server");
-            let smtp = Server::new(domain.as_str(), stream, db).await;
+            let smtp = Server::new(domain.as_str(), stream, db, metrics, greeting_start).await;
             let _ = timeout(Duration::from_secs(300), smtp.connection()).await;
-        }).await;
+        });
     }
 }
 
