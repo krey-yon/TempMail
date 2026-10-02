@@ -3,7 +3,7 @@ use crate::errors::SmtpResponseError;
 #[derive(Default, Clone, Debug)]
 pub struct Email {
     pub sender: String,
-    pub recipients: Vec<String>,
+    pub recipients: Vec<database::database::MailRecipient>,
     pub content: String,
     pub size: usize,
 }
@@ -13,9 +13,7 @@ pub enum CurrentStates {
     Greeted,
     AwaitingRecipient(Email),
     AwaitingData(Email),
-    DataReceived(Email),
 }
-
 
 pub type SMTPResult<'a, T> = Result<T, SmtpResponseError<'a>>;
 
@@ -72,7 +70,10 @@ mod tests {
     fn test_email_clone() {
         let email = Email {
             sender: "test@example.com".to_string(),
-            recipients: vec!["recipient@example.com".to_string()],
+            recipients: vec![database::database::MailRecipient {
+                address: "recipient@example.com".to_string(),
+                mailbox_id: "mailbox-id".to_string(),
+            }],
             content: "Hello".to_string(),
             size: 5,
         };

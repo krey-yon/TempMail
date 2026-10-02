@@ -21,7 +21,7 @@ async fn main() {
         .unwrap();
 
     let domain = env::var("MAIL_DOMAIN")
-        .unwrap_or_else(|_| "mail.kreyon.in".to_string());
+        .unwrap_or_else(|_| "xelio.me".to_string());
 
     start_smtp_server(addr, domain).await
 }

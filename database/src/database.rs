@@ -7,6 +7,17 @@ use std::{env, error::Error};
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{error, info};
 
+fn token_eq(stored: &str, presented: &str) -> bool {
+    if stored.len() != presented.len() {
+        return false;
+    }
+    stored
+        .bytes()
+        .zip(presented.bytes())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
+}
+
 pub struct DatabaseClient {
     pub pool: Pool,
 }
@@ -17,6 +28,50 @@ pub struct Email {
     pub recipients: Vec<String>,
     pub content: String,
     pub size: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MailRecipient {
+    pub address: String,
+    pub mailbox_id: String,
+}
+
+#[derive(Debug)]
+pub enum MailDeliveryError {
+    MailboxUnavailable,
+    QuotaExceeded,
+}
+
+impl std::fmt::Display for MailDeliveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::MailboxUnavailable => "Mailbox unavailable",
+            Self::QuotaExceeded => "Mailbox quota exceeded",
+        })
+    }
+}
+
+impl Error for MailDeliveryError {}
+
+// All lifecycle mutations lock the address, including when no mailbox exists.
+// This prevents creation, expiry, and SMTP delivery from crossing ownerships.
+async fn lock_address(
+    tx: &tokio_postgres::Transaction<'_>,
+    address: &str,
+) -> Result<(), tokio_postgres::Error> {
+    tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&address]).await?;
+    Ok(())
+}
+
+async fn remove_mailbox(
+    tx: &tokio_postgres::Transaction<'_>,
+    address: &str,
+) -> Result<u64, tokio_postgres::Error> {
+    tx.execute("DELETE FROM mail WHERE recipients = $1", &[&address]).await?;
+    tx.execute("DELETE FROM user_config WHERE mail = $1 OR address = $1", &[&address]).await?;
+    tx.execute("DELETE FROM quota WHERE address = $1", &[&address]).await?;
+    tx.execute("DELETE FROM email_registry WHERE username = split_part($1, '@', 1)", &[&address]).await?;
+    tx.execute("DELETE FROM email_addresses WHERE address = $1", &[&address]).await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -32,6 +87,8 @@ pub struct MailRow {
 pub struct EmailAddress {
     pub address: String,
     pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +116,12 @@ impl DatabaseClient {
                 .unwrap_or_else(|_| "5432".to_string())
                 .parse()?,
         );
+        pg_config.ssl_mode(match env::var("DB_SSLMODE").as_deref().unwrap_or("prefer") {
+            "disable" => tokio_postgres::config::SslMode::Disable,
+            "prefer" => tokio_postgres::config::SslMode::Prefer,
+            "require" => tokio_postgres::config::SslMode::Require,
+            _ => return Err("DB_SSLMODE must be disable, prefer, or require".into()),
+        });
 
         let mut root_store = rustls::RootCertStore::empty();
         let certs = load_native_certs();
@@ -160,61 +223,80 @@ impl DatabaseClient {
             return Err(Box::new(e));
         }
 
+        let token_sql = r#"
+            ALTER TABLE email_addresses ADD COLUMN IF NOT EXISTS access_token TEXT UNIQUE;
+            UPDATE email_addresses
+            SET access_token = encode(gen_random_bytes(32), 'hex')
+            WHERE access_token IS NULL;
+        "#;
+        if let Err(e) = client.batch_execute(token_sql).await {
+            error!("Failed to add mailbox access_token column: {}", e);
+            return Err(Box::new(e));
+        }
+
+        client.batch_execute(include_str!("../migrations/004_reusable_usernames.sql")).await?;
+
         info!("Database initialized successfully with connection pooling");
         Ok(DatabaseClient { pool })
     }
 
     // ============== MAIL OPERATIONS ==============
 
-    pub async fn add_mail(&self, data: Email) -> Result<u64, Box<dyn Error + Send + Sync>> {
-        let mut retry_count = 0;
-        let max_retries = 3;
+    pub async fn get_active_mailbox(&self, address: &str) -> Result<Option<MailRecipient>, Box<dyn Error + Send + Sync>> {
+        let client = self.pool.get().await?;
+        let row = client.query_opt(
+            "SELECT id::text FROM email_addresses WHERE address = $1 AND created_at::timestamp > (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours'",
+            &[&address],
+        ).await?;
+        Ok(row.map(|row| MailRecipient { address: address.to_string(), mailbox_id: row.get(0) }))
+    }
 
-        while retry_count < max_retries {
-            match self.pool.get().await {
-                Ok(client) => {
-                    let sql: &str = "INSERT INTO mail (date, sender, recipients, data) VALUES ($1, $2, $3, $4)";
-                    let date: String = chrono::Utc::now()
-                        .format("%Y-%m-%d %H:%M:%S%.3f")
-                        .to_string();
-
-                    // Normalize recipient: strip angle brackets if present
-                    let normalized_recipient = data.recipients[0]
-                        .trim_start_matches('<')
-                        .trim_end_matches('>');
-
-                    match client
-                        .execute(
-                            sql,
-                            &[&date, &data.sender, &normalized_recipient, &data.content],
-                        )
-                        .await
-                    {
-                        Ok(rows_affected) => return Ok(rows_affected),
-                        Err(e) if retry_count < max_retries - 1 => {
-                            error!("add_mail failed (attempt {}): {}", retry_count + 1, e);
-                            retry_count += 1;
-                            tokio::time::sleep(tokio::time::Duration::from_millis(100 * (retry_count as u64))).await;
-                            continue;
-                        }
-                        Err(e) => {
-                            error!("Failed to add mail to the database: {}", e);
-                            return Err(Box::new(e));
-                        }
-                    }
-                }
-                Err(e) if retry_count < max_retries - 1 => {
-                    error!("Failed to get connection from pool (attempt {}): {}", retry_count + 1, e);
-                    retry_count += 1;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100 * (retry_count as u64))).await;
-                }
-                Err(e) => {
-                    error!("Failed to get connection from pool: {}", e);
-                    return Err(Box::new(e));
-                }
+    // Save all recipients before SMTP acknowledges DATA. The captured mailbox
+    // IDs ensure mail cannot be delivered to a replacement owner mid-transaction.
+    pub async fn deliver_mail(
+        &self,
+        data: Email,
+        recipients: &[MailRecipient],
+    ) -> Result<Vec<(String, Option<String>)>, Box<dyn Error + Send + Sync>> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        let mut recipients = recipients.to_vec();
+        recipients.sort_by(|a, b| a.address.cmp(&b.address));
+        recipients.dedup_by(|a, b| a.address == b.address);
+        let mut notifications = Vec::new();
+        for recipient in &recipients {
+            lock_address(&tx, &recipient.address).await?;
+            let active = tx.query_opt(
+                "SELECT id FROM email_addresses WHERE address = $1 AND id::text = $2 AND created_at::timestamp > (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours'",
+                &[&recipient.address, &recipient.mailbox_id],
+            ).await?;
+            if active.is_none() {
+                return Err(Box::new(MailDeliveryError::MailboxUnavailable));
             }
+            let quota = tx.execute(
+                "UPDATE quota SET completed = completed + 1 WHERE address = $1 AND completed < quota_limit",
+                &[&recipient.address],
+            ).await?;
+            if quota == 0 {
+                return Err(Box::new(MailDeliveryError::QuotaExceeded));
+            }
+            tx.execute(
+                "INSERT INTO mail (date, sender, recipients, data) VALUES ((clock_timestamp() AT TIME ZONE 'UTC')::text, $1, $2, $3)",
+                &[&data.sender, &recipient.address, &data.content],
+            ).await?;
+            let webhook = tx.query_opt(
+                "SELECT web_hook_address FROM user_config WHERE mail = $1",
+                &[&recipient.address],
+            ).await?.and_then(|row| row.get::<_, Option<String>>(0));
+            notifications.push((recipient.address.clone(), webhook));
         }
-        Err("Max retries exceeded".into())
+        let count = recipients.len() as i64;
+        tx.execute(
+            "INSERT INTO analytics (event_type, event_count, last_updated) VALUES ('emails_received', $1, now()::text) ON CONFLICT (event_type) DO UPDATE SET event_count = analytics.event_count + EXCLUDED.event_count, last_updated = EXCLUDED.last_updated",
+            &[&count],
+        ).await?;
+        tx.commit().await?;
+        Ok(notifications)
     }
 
     pub async fn delete_old_mail(&self) -> Result<u64, Box<dyn Error + Send + Sync>> {
@@ -239,12 +321,13 @@ impl DatabaseClient {
     pub async fn get_mails_by_recipient(
         &self,
         recipient: &str,
+        token: &str,
     ) -> Result<Vec<MailRow>, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
         let normalized_recipient = recipient.trim_start_matches('<').trim_end_matches('>');
         let sql =
-            "SELECT id::text, date, sender, recipients, data FROM mail WHERE recipients = $1 ORDER BY date DESC";
-        match client.query(sql, &[&normalized_recipient]).await {
+            "SELECT m.id::text, m.date, m.sender, m.recipients, m.data FROM mail m JOIN email_addresses ea ON ea.address = m.recipients WHERE ea.address = $1 AND ea.access_token = $2 AND ea.created_at::timestamp > (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours' ORDER BY m.date DESC";
+        match client.query(sql, &[&normalized_recipient, &token]).await {
             Ok(rows) => {
                 let mails: Vec<MailRow> = rows
                     .into_iter()
@@ -265,18 +348,18 @@ impl DatabaseClient {
         }
     }
 
-    pub async fn get_mail_by_id(&self, id: &str) -> Result<Option<MailRow>, Box<dyn Error + Send + Sync>> {
+    pub async fn get_mail_by_id(&self, id: &str, address: &str, token: &str) -> Result<Option<MailRow>, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
-        let sql = "SELECT id::text, date, sender, recipients, data FROM mail WHERE id = $1::uuid";
-        match client.query_one(sql, &[&id]).await {
-            Ok(row) => Ok(Some(MailRow {
+        let sql = "SELECT m.id::text, m.date, m.sender, m.recipients, m.data FROM mail m JOIN email_addresses ea ON ea.address = m.recipients WHERE m.id::text = $1 AND ea.address = $2 AND ea.access_token = $3 AND ea.created_at::timestamp > (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours'";
+        match client.query_opt(sql, &[&id, &address, &token]).await {
+            Ok(Some(row)) => Ok(Some(MailRow {
                 id: row.get(0),
                 date: row.get(1),
                 sender: row.get(2),
                 recipients: row.get(3),
                 data: row.get(4),
             })),
-            Err(e) if e.to_string().contains("no rows returned") => Ok(None),
+            Ok(None) => Ok(None),
             Err(e) => {
                 error!("Failed to get mail by id: {}", e);
                 Err(Box::new(e))
@@ -284,10 +367,10 @@ impl DatabaseClient {
         }
     }
 
-    pub async fn delete_mail(&self, id: &str) -> Result<u64, Box<dyn Error + Send + Sync>> {
+    pub async fn delete_mail(&self, id: &str, address: &str, token: &str) -> Result<u64, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
-        let sql = "DELETE FROM mail WHERE id = $1";
-        match client.execute(sql, &[&id]).await {
+        let sql = "DELETE FROM mail m USING email_addresses ea WHERE m.recipients = ea.address AND m.id::text = $1 AND ea.address = $2 AND ea.access_token = $3 AND ea.created_at::timestamp > (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours'";
+        match client.execute(sql, &[&id, &address, &token]).await {
             Ok(rows) => Ok(rows),
             Err(e) => {
                 error!("Failed to delete mail: {}", e);
@@ -392,93 +475,107 @@ impl DatabaseClient {
     pub async fn create_email_address(&self, username: &str) -> Result<EmailAddress, Box<dyn Error + Send + Sync>> {
         let domain = env::var("MAIL_DOMAIN").unwrap_or_else(|_| "xelio.me".to_string());
         let address = format!("{}@{}", username, domain);
-        let created_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-        let default_quota_limit: i32 = 1000;
-
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
+        lock_address(&tx, &address).await?;
 
-        // 1. Register username permanently — this is the global uniqueness gatekeeper
-        let registry_sql = "INSERT INTO email_registry (username, created_at) VALUES ($1, $2) ON CONFLICT (username) DO NOTHING";
-        let registry_rows = tx.execute(registry_sql, &[&username, &created_at]).await?;
-
-        if registry_rows == 0 {
-            // Username already exists globally — rollback and return error
-            tx.rollback().await?;
-            return Err(format!("Username '{}' is already taken. Please choose a different username.", username).into());
+        let existing = tx.query_opt(
+            "SELECT created_at::timestamp <= (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours' FROM email_addresses WHERE address = $1",
+            &[&address],
+        ).await?;
+        if let Some(row) = existing {
+            if !row.get::<_, bool>(0) {
+                return Err(format!("Username '{}' is already taken. Please choose a different username.", username).into());
+            }
         }
-
-        // 2. Insert or restore quota entry
-        let quota_sql = "INSERT INTO quota (address, quota_limit, completed) VALUES ($1, $2, 0) ON CONFLICT (address) DO UPDATE SET quota_limit = EXCLUDED.quota_limit, completed = 0";
-        tx.execute(quota_sql, &[&address, &default_quota_limit]).await?;
-
-        // 3. Insert email address (active)
-        let addr_sql = "INSERT INTO email_addresses (address, created_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING";
-        let rows = tx.execute(addr_sql, &[&address, &created_at]).await?;
-
-        if rows == 0 {
-            // Address already exists in active table — rollback to keep state clean
-            tx.rollback().await?;
-            return Err(format!("Username '{}' is already taken. Please choose a different username.", username).into());
-        }
-
+        // Also clear any orphaned data left by older versions. This never runs
+        // for an active mailbox and is rolled back if creation fails.
+        remove_mailbox(&tx, &address).await?;
+        let row = tx.query_one(
+            "INSERT INTO email_addresses (address, created_at, access_token) VALUES ($1, (clock_timestamp() AT TIME ZONE 'UTC')::text, encode(gen_random_bytes(32), 'hex')) RETURNING created_at, access_token",
+            &[&address],
+        ).await?;
+        let created_at: String = row.get(0);
+        let access_token: String = row.get(1);
+        tx.execute(
+            "INSERT INTO quota (address, quota_limit, completed) VALUES ($1, 1000, 0)",
+            &[&address],
+        ).await?;
+        tx.execute(
+            "INSERT INTO email_registry (username, created_at) VALUES ($1, $2) ON CONFLICT (username) DO UPDATE SET created_at = EXCLUDED.created_at",
+            &[&username, &created_at],
+        ).await?;
+        tx.execute(
+            "INSERT INTO analytics (event_type, event_count, last_updated) VALUES ('email_address_created', 1, now()::text) ON CONFLICT (event_type) DO UPDATE SET event_count = analytics.event_count + 1, last_updated = EXCLUDED.last_updated",
+            &[],
+        ).await?;
         tx.commit().await?;
-        Ok(EmailAddress {
-            address: address.clone(),
-            created_at: Some(created_at),
-        })
+        Ok(EmailAddress { address, created_at: Some(created_at), access_token: Some(access_token) })
     }
 
-    pub async fn delete_email_address(&self, address: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {
+    pub async fn mailbox_token_matches(
+        &self,
+        address: &str,
+        presented: &str,
+    ) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        let client = self.pool.get().await?;
+        let sql = "SELECT access_token FROM email_addresses WHERE address = $1 AND created_at::timestamp > (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours'";
+        match client.query_opt(sql, &[&address]).await {
+            Ok(Some(row)) => {
+                let stored: Option<String> = row.get(0);
+                Ok(stored
+                    .as_deref()
+                    .map(|s| token_eq(s, presented))
+                    .unwrap_or(false))
+            }
+            Ok(None) => Ok(false),
+            Err(e) => {
+                error!("Failed to read mailbox token: {}", e);
+                Err(Box::new(e))
+            }
+        }
+    }
+
+    pub async fn delete_email_address(&self, address: &str, token: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
-
-        // Cascade delete all associated data
-        let _ = tx.execute("DELETE FROM mail WHERE recipients = $1", &[&address]).await;
-        let _ = tx.execute("DELETE FROM user_config WHERE mail = $1", &[&address]).await;
-        let _ = tx.execute("DELETE FROM quota WHERE address = $1", &[&address]).await;
-
-        let rows = tx.execute("DELETE FROM email_addresses WHERE address = $1", &[&address]).await?;
-
-        tx.commit().await?;
-
-        if rows > 0 {
-            info!("Email address cascade deleted: {}", address);
+        lock_address(&tx, address).await?;
+        let row = tx.query_opt(
+            "SELECT access_token FROM email_addresses WHERE address = $1 AND created_at::timestamp > (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours'",
+            &[&address],
+        ).await?;
+        let valid = row.and_then(|row| row.get::<_, Option<String>>(0))
+            .is_some_and(|stored| token_eq(&stored, token));
+        if !valid {
+            return Ok(false);
         }
-
+        let rows = remove_mailbox(&tx, address).await?;
+        tx.commit().await?;
         Ok(rows > 0)
     }
 
     pub async fn delete_old_email_addresses(&self) -> Result<u64, Box<dyn Error + Send + Sync>> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
-
-        let now = chrono::Utc::now();
-        let a_day_ago = now - chrono::Duration::days(1);
-        let a_day_ago = a_day_ago.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-
-        let rows = tx
-            .query("SELECT address FROM email_addresses WHERE created_at < $1", &[&a_day_ago])
-            .await?;
-        let mut deleted_count = 0u64;
-
+        let rows = tx.query(
+            "SELECT address FROM email_addresses WHERE created_at::timestamp <= (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours' ORDER BY address",
+            &[],
+        ).await?;
+        let mut deleted_count = 0;
         for row in rows {
             let address: String = row.get(0);
-
-            let _ = tx.execute("DELETE FROM mail WHERE recipients = $1", &[&address]).await;
-            let _ = tx.execute("DELETE FROM user_config WHERE mail = $1", &[&address]).await;
-            let _ = tx.execute("DELETE FROM quota WHERE address = $1", &[&address]).await;
-            let result = tx
-                .execute("DELETE FROM email_addresses WHERE address = $1", &[&address])
-                .await?;
-
-            if result > 0 {
-                deleted_count += 1;
+            lock_address(&tx, &address).await?;
+            // A creator may have reclaimed it while cleanup waited for the lock.
+            let expired = tx.query_opt(
+                "SELECT id FROM email_addresses WHERE address = $1 AND created_at::timestamp <= (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours'",
+                &[&address],
+            ).await?;
+            if expired.is_some() {
+                deleted_count += remove_mailbox(&tx, &address).await?;
             }
         }
-
         tx.commit().await?;
-        info!("Deleted {} old email addresses", deleted_count);
+        info!("Deleted {} expired email addresses", deleted_count);
         Ok(deleted_count)
     }
 
@@ -576,31 +673,18 @@ impl DatabaseClient {
 
     pub async fn get_total_stats(&self) -> Result<TotalStats, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
-
-        let email_addresses_count: i64 = client
-            .query_one("SELECT COUNT(*) FROM email_addresses", &[])
-            .await
-            .map(|row| row.get(0))
-            .unwrap_or(0);
-
-        let total_emails_count: i64 = client
-            .query_one("SELECT COUNT(*) FROM mail", &[])
-            .await
-            .map(|row| row.get(0))
-            .unwrap_or(0);
-
-        let total_webhooks_count: i64 = client
-            .query_one("SELECT COUNT(*) FROM user_config WHERE web_hook_address IS NOT NULL", &[])
-            .await
-            .map(|row| row.get(0))
-            .unwrap_or(0);
-
+        let row = client.query_one(
+            "SELECT (SELECT COUNT(*) FROM email_addresses WHERE created_at::timestamp > (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours'), (SELECT COUNT(*) FROM mail), (SELECT COUNT(*) FROM user_config WHERE web_hook_address IS NOT NULL), COALESCE((SELECT event_count FROM analytics WHERE event_type = 'email_address_created'), 0)",
+            &[],
+        ).await?;
         Ok(TotalStats {
-            total_email_addresses: email_addresses_count,
-            total_emails_received: total_emails_count,
-            total_webhooks_configured: total_webhooks_count,
+            total_email_addresses: row.get(0),
+            total_emails_received: row.get(1),
+            total_webhooks_configured: row.get(2),
+            total_addresses_created: row.get(3),
         })
     }
+
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -615,4 +699,5 @@ pub struct TotalStats {
     pub total_email_addresses: i64,
     pub total_emails_received: i64,
     pub total_webhooks_configured: i64,
+    pub total_addresses_created: i64,
 }

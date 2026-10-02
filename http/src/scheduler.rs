@@ -7,8 +7,8 @@ use tracing::{error, info};
 pub async fn start_cleanup_scheduler(db: Arc<DatabaseClient>) -> Result<(), Box<dyn Error>> {
     let scheduler = JobScheduler::new().await?;
 
-    // Run every day at 2 AM UTC
-    let job = Job::new_async("0 0 2 * * *", move |_uuid, _l| {
+    // Sweep expired records every minute; access and creation enforce the 24-hour deadline.
+    let job = Job::new_async("0 * * * * *", move |_uuid, _l| {
         let db = db.clone();
         Box::pin(async move {
             info!("Starting automatic email cleanup");
@@ -26,6 +26,6 @@ pub async fn start_cleanup_scheduler(db: Arc<DatabaseClient>) -> Result<(), Box<
     scheduler.add(job).await?;
     scheduler.start().await?;
 
-    info!("Cleanup scheduler started (runs daily at 2 AM UTC)");
+    info!("Cleanup scheduler started (runs every minute)");
     Ok(())
 }

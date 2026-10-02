@@ -1,5 +1,11 @@
 # Database Migrations
 
+`004_reusable_usernames.sql` runs automatically during database initialization
+after schema creation. It preserves the best available lifetime creation count
+before releasing historical username reservations. It is safe to run again.
+Deploy and restart both HTTP and SMTP together; older binaries still implement
+permanent reservations and nontransactional creation counting.
+
 ## Running Migrations
 
 ### Option 1: Direct SQL (Recommended for production)

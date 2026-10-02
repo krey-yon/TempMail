@@ -7,6 +7,7 @@ pub enum SmtpErrorCode {
     InsufficientSystemStorage,
     MessageSizeExceedsLimit,
     TransactionFailed,
+    TemporaryFailure,
 }
 
 impl SmtpErrorCode {
@@ -19,6 +20,7 @@ impl SmtpErrorCode {
             SmtpErrorCode::InsufficientSystemStorage => 452,
             SmtpErrorCode::MessageSizeExceedsLimit => 552,
             SmtpErrorCode::TransactionFailed => 554,
+            SmtpErrorCode::TemporaryFailure => 451,
         }
     }
 
@@ -35,6 +37,7 @@ impl SmtpErrorCode {
                 "Requested action aborted (message size exceeds limit)"
             }
             SmtpErrorCode::TransactionFailed => "Transaction failed",
+            SmtpErrorCode::TemporaryFailure => "Requested action aborted (local error in processing)",
         }
     }
 }
@@ -55,7 +58,7 @@ impl<'a> SmtpResponseError<'a> {
     }
 
     pub fn format_response(&self) -> String {
-        format!("{} {}\n", self.code.as_code(), self.message)
+        format!("{} {}\r\n", self.code.as_code(), self.message)
     }
 }
 
@@ -95,7 +98,7 @@ mod tests {
     #[test]
     fn test_format_response() {
         let err = SmtpResponseError::new(&SmtpErrorCode::SyntaxError);
-        assert_eq!(err.format_response(), "500 Syntax error, command unrecognized\n");
+        assert_eq!(err.format_response(), "500 Syntax error, command unrecognized\r\n");
     }
 
     #[test]

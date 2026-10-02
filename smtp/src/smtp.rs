@@ -1,25 +1,31 @@
-use std::{mem::take, sync::Arc};
+use std::sync::Arc;
 
-use database::database::DatabaseClient;
-use database::quota::AddressLimits;
-use database::webhooks::Webhooks;
+use database::database::{DatabaseClient, MailDeliveryError};
 use tracing::{error, info};
 
 use crate::{
-    errors::{SmtpErrorCode, SmtpResponseError}, is_email_valid, server::CLOSING_CONNECTION, types::{CurrentStates, Email, SMTPResult, SmtpReply}, webhook::{extract_otp, send_webhook, Payload}
+    errors::{SmtpErrorCode, SmtpResponseError},
+    is_email_valid,
+    server::CLOSING_CONNECTION,
+    types::{CurrentStates, Email, SMTPResult, SmtpReply},
+    webhook::{extract_otp, send_webhook, Payload},
 };
 
 const MAX_EMAIL_SIZE: usize = 10_485_760;
-const SUCCESS_RESPONSE: &'static [u8] = b"250 Ok\n";
-const AUTH_OK: &'static [u8] = b"235 Ok\n";
+const SUCCESS_RESPONSE: &[u8] = b"250 Ok\r\n";
 const MAX_RECIPIENT_COUNT: usize = 100;
-const DATA_READY_PROMPT: &'static [u8] = b"354 End data with <CR><LF>.<CR><LF>\n";
+const DATA_READY_PROMPT: &[u8] = b"354 End data with <CR><LF>.<CR><LF>\r\n";
 
 fn extract_subject(content: &str) -> String {
     content
         .lines()
         .find(|line| line.to_lowercase().starts_with("subject:"))
-        .map(|s| s.trim_start_matches("Subject:").trim_start_matches("subject:").trim().to_string())
+        .map(|s| {
+            s.trim_start_matches("Subject:")
+                .trim_start_matches("subject:")
+                .trim()
+                .to_string()
+        })
         .unwrap_or_else(|| "(no subject)".to_string())
 }
 
@@ -34,12 +40,9 @@ impl HandleCurrentState {
     pub fn new(server_domain: impl AsRef<str>) -> Self {
         let server_domain = server_domain.as_ref();
         let greeting_message = format!(
-            "250-{server_domain} greets {server_domain}\n\
-             250-SIZE {}\n\
-             250 8BITMIME\n",
+            "250-{server_domain} greets {server_domain}\r\n250-SIZE {}\r\n250 8BITMIME\r\n",
             MAX_EMAIL_SIZE
         );
-
         Self {
             current_state: CurrentStates::Initial,
             greeting_message,
@@ -51,56 +54,42 @@ impl HandleCurrentState {
     pub async fn process_smtp_command<'a>(
         &mut self,
         client_message: &str,
-        db: &Arc<DatabaseClient>
+        db: &Arc<DatabaseClient>,
     ) -> SMTPResult<'a, SmtpReply<'_>> {
-        let message = client_message.trim();
-
-        if message.is_empty() {
+        // Body lines, including blank lines or words like QUIT, are data.
+        let previous_state = std::mem::replace(&mut self.current_state, CurrentStates::Initial);
+        if let CurrentStates::AwaitingData(email) = previous_state {
+            return self.receive_data(client_message, email, db).await;
+        }
+        self.current_state = previous_state;
+        let mut parts = client_message.split_whitespace();
+        let command = parts.next().unwrap_or("").to_ascii_lowercase();
+        if command.is_empty() {
             return Err(SmtpResponseError::new(&SmtpErrorCode::SyntaxError));
         }
-
-        let mut message_parts = message.split_whitespace();
-        let command = message_parts
-            .next()
-            .ok_or_else(|| SmtpResponseError::new(&SmtpErrorCode::SyntaxError))?
-            .to_lowercase();
-
-        let previous_state = std::mem::replace(&mut self.current_state, CurrentStates::Initial);
-
-        match (command.as_str(), previous_state) {
-            ("ehlo", CurrentStates::Initial) => {
+        match command.as_str() {
+            "quit" => return Ok(SmtpReply::closing(CLOSING_CONNECTION)),
+            "noop" => return Ok(SmtpReply::none(SUCCESS_RESPONSE)),
+            "rset" => {
+                self.current_state = CurrentStates::Greeted;
+                return Ok(SmtpReply::none(SUCCESS_RESPONSE));
+            }
+            _ => {}
+        }
+        let state = std::mem::replace(&mut self.current_state, CurrentStates::Initial);
+        match (command.as_str(), state) {
+            ("ehlo" | "helo", _) => {
                 self.current_state = CurrentStates::Greeted;
                 Ok(SmtpReply::none(self.greeting_message.as_bytes()))
-            },
-            ("helo", CurrentStates::Initial) => {
-                self.current_state = CurrentStates::Greeted;
-                Ok(SmtpReply::none(self.greeting_message.as_bytes()))
-            },
-            ("noop", _) | ("help", _) | ("info", _) | ("vrfy", _) | ("expn", _) => {
-                tracing::warn!("RECIEVED: Unhandled commands");
-                Ok(SmtpReply::none(SUCCESS_RESPONSE))
-            }
-            ("rset", _) => {
-                tracing::warn!("RECIEVED: Reset");
-                self.current_state = CurrentStates::Initial;
-                Ok(SmtpReply::none(SUCCESS_RESPONSE))
-            }
-            ("auth", _) => {
-                tracing::trace!("RECIEVED: auth");
-                Ok(SmtpReply::none(AUTH_OK))
             }
             ("mail", CurrentStates::Greeted) => {
-                let sender = message_parts
+                let sender = parts
                     .next()
-                    .and_then(|s| s.strip_prefix("FROM:"))
+                    .and_then(|s| s.strip_prefix("FROM:").or_else(|| s.strip_prefix("from:")))
                     .ok_or_else(|| SmtpResponseError::new(&SmtpErrorCode::InvalidParameters))?;
-
-                if !is_email_valid(sender) {
+                if !is_email_valid(sender) && sender != "<>" {
                     return Err(SmtpResponseError::new(&SmtpErrorCode::MailboxUnavailable));
                 }
-
-                tracing::trace!("RECIEVED MAIL from {}", sender);
-
                 self.current_state = CurrentStates::AwaitingRecipient(Email {
                     sender: sender.to_string(),
                     ..Default::default()
@@ -109,135 +98,126 @@ impl HandleCurrentState {
             }
             ("rcpt", CurrentStates::AwaitingRecipient(mut email)) => {
                 if email.recipients.len() >= MAX_RECIPIENT_COUNT {
-                    tracing::error!(
-                        "ERROR: Max number of recipients reached, got: {}",
-                        email.recipients.len()
-                    );
+                    self.current_state = CurrentStates::AwaitingRecipient(email);
                     return Err(SmtpResponseError::new(
                         &SmtpErrorCode::InsufficientSystemStorage,
                     ));
                 }
-                let receiver = message_parts
+                let receiver = parts
                     .next()
-                    .and_then(|s| s.strip_prefix("TO:"))
+                    .and_then(|s| s.strip_prefix("TO:").or_else(|| s.strip_prefix("to:")))
                     .ok_or_else(|| SmtpResponseError::new(&SmtpErrorCode::InvalidParameters))?;
-
-                if !is_email_valid(receiver) {
-                    tracing::error!("ERROR: Invalid email: {}", receiver);
+                let address = receiver.trim_start_matches('<').trim_end_matches('>');
+                if !is_email_valid(address)
+                    || address.rsplit('@').next() != Some(self.server_domain.as_str())
+                {
+                    self.current_state = CurrentStates::AwaitingRecipient(email);
                     return Err(SmtpResponseError::new(&SmtpErrorCode::MailboxUnavailable));
                 }
-
-                let receiver_clean = receiver.trim_start_matches('<').trim_end_matches('>');
-                let receiver_domain = receiver_clean.split('@').nth(1).unwrap_or("");
-                if receiver_domain != self.server_domain {
-                    tracing::error!("ERROR: Relay denied for domain: {}", receiver_domain);
-                    return Err(SmtpResponseError::new(&SmtpErrorCode::MailboxUnavailable));
+                let mailbox = db.get_active_mailbox(address).await;
+                match mailbox {
+                    Ok(Some(recipient)) => {
+                        if !email.recipients.contains(&recipient) {
+                            email.recipients.push(recipient);
+                        }
+                        self.current_state = CurrentStates::AwaitingRecipient(email);
+                        Ok(SmtpReply::none(SUCCESS_RESPONSE))
+                    }
+                    Ok(None) => {
+                        self.current_state = CurrentStates::AwaitingRecipient(email);
+                        Err(SmtpResponseError::new(&SmtpErrorCode::MailboxUnavailable))
+                    }
+                    Err(e) => {
+                        error!("Recipient lookup failed: {}", e);
+                        self.current_state = CurrentStates::AwaitingRecipient(email);
+                        Err(SmtpResponseError::new(&SmtpErrorCode::TemporaryFailure))
+                    }
                 }
-
-                email.recipients.push(receiver.to_string());
-                tracing::trace!("RECIEVED: RCPT TO: {}", receiver);
-                self.current_state = CurrentStates::AwaitingRecipient(email);
-                Ok(SmtpReply::none(SUCCESS_RESPONSE))
             }
             ("data", CurrentStates::AwaitingRecipient(email)) => {
                 if email.recipients.is_empty() {
-                    tracing::error!("ERROR: Recieved DATA with no recipients");
+                    self.current_state = CurrentStates::AwaitingRecipient(email);
                     return Err(SmtpResponseError::new(&SmtpErrorCode::TransactionFailed));
                 }
                 self.current_state = CurrentStates::AwaitingData(email);
                 Ok(SmtpReply::none(DATA_READY_PROMPT))
             }
-            ("quit", state) => match state {
-                 CurrentStates::DataReceived(email) => {
-                    tracing::info!(recipient_count = email.recipients.len(), "Mail received from {}, saving to database", email.sender);
-                    tracing::debug!(subject = extract_subject(&email.content), size = email.size, "Email details");
-                    tracing::trace!(content_preview = email.content.chars().take(200).collect::<String>(), "Email content preview");
-
-                    // Process each recipient: check quota, save email, send webhook
-                    for recipient in &email.recipients {
-                        let mail_addr = recipient.trim_start_matches('<').trim_end_matches('>');
-
-                        // Check quota and increment if allowed
-                        let quota_ok = match AddressLimits::check_and_increment(db, mail_addr).await {
-                            Ok(true) => true,
-                            Ok(false) => {
-                                tracing::warn!("Quota exceeded for recipient: {}", mail_addr);
-                                false
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to check quota for {}: {}", mail_addr, e);
-                                true // Allow on quota check failure to not lose mail
-                            }
-                        };
-
-                        if !quota_ok {
-                            continue;
-                        }
-
-                        // Save email to database
-                        let db_email = database::database::Email {
-                            sender: email.sender.clone(),
-                            recipients: vec![recipient.clone()],
-                            content: email.content.clone(),
-                            size: email.size,
-                        };
-                        match db.add_mail(db_email).await {
-                            Ok(rows) => {
-                                tracing::info!("Mail saved to database for {}, rows affected: {}", mail_addr, rows);
-                                // Track analytics
-                                let _ = db.increment_analytics("emails_received").await;
-                            }
-                            Err(e) => tracing::error!("Failed to save mail to database for {}: {}", mail_addr, e),
-                        }
-
-                        // Send webhook notification if configured
-                        if let Ok(Some(webhook_url)) = Webhooks::get_webhook_address_for_mail(db, mail_addr).await {
-                            let otp = extract_otp(&email.content);
-                            let payload = Payload {
-                                version: 1,
-                                otp,
-                                mail: mail_addr.to_string(),
-                            };
-                            match send_webhook(&webhook_url, &payload).await {
-                                Ok(_) => info!("Webhook sent successfully for {}", mail_addr),
-                                Err(e) => tracing::error!("Failed to send webhook for {}: {}", mail_addr, e),
-                            }
-                        }
-                    }
-
-                    Ok(SmtpReply::closing(CLOSING_CONNECTION))
-                }
-                _ => {
-                    tracing::warn!("QUIT before DATA completed, discarding mail");
-                    Ok(SmtpReply::closing(CLOSING_CONNECTION))
-                }
-            },
-            (_, CurrentStates::AwaitingData(mut email)) => {
-                email.size += client_message.len();
-                if email.size > self.max_email_size {
-                    tracing::error!("ERROR: Message size of 10MB exceeded. Closing!");
-                    return Err(SmtpResponseError::new(
-                        &SmtpErrorCode::MessageSizeExceedsLimit,
-                    ));
-                }
-                email.content.push_str(client_message);
-
-                let response =
-                    if email.content.ends_with("\n.\n") || email.content.ends_with("\r\n.\r\n") {
-                        self.current_state = CurrentStates::DataReceived(take(&mut email));
-                        SmtpReply::data_accepted(SUCCESS_RESPONSE)
-                    } else {
-                        self.current_state = CurrentStates::AwaitingData(take(&mut email));
-                        SmtpReply::none(b"")
-                    };
-
-                Ok(response)
-            }
-            _ => {
-                error!("Unrecorgnized command");
+            (_, state) => {
+                self.current_state = state;
                 Err(SmtpResponseError::new(&SmtpErrorCode::CommandUnrecognized))
             }
         }
+    }
+
+    async fn receive_data<'a>(
+        &mut self,
+        line: &str,
+        mut email: Email,
+        db: &Arc<DatabaseClient>,
+    ) -> SMTPResult<'a, SmtpReply<'_>> {
+        if line != ".\r\n" && line != ".\n" {
+            email.size += line.len();
+            if email.size > self.max_email_size {
+                self.current_state = CurrentStates::Greeted;
+                return Err(SmtpResponseError::new(
+                    &SmtpErrorCode::MessageSizeExceedsLimit,
+                ));
+            }
+            // SMTP dot-stuffing escapes a leading dot in body lines.
+            email.content.push_str(if line.starts_with("..") {
+                &line[1..]
+            } else {
+                line
+            });
+            self.current_state = CurrentStates::AwaitingData(email);
+            return Ok(SmtpReply::none(b""));
+        }
+        self.current_state = CurrentStates::Greeted;
+        let data = database::database::Email {
+            sender: email.sender.clone(),
+            recipients: email.recipients.iter().map(|r| r.address.clone()).collect(),
+            content: email.content.clone(),
+            size: email.size,
+        };
+        let notifications = match db.deliver_mail(data, &email.recipients).await {
+            Ok(notifications) => notifications,
+            Err(e) => {
+                error!("SMTP delivery failed: {}", e);
+                let code = match e.downcast_ref::<MailDeliveryError>() {
+                    Some(MailDeliveryError::MailboxUnavailable) => {
+                        &SmtpErrorCode::MailboxUnavailable
+                    }
+                    Some(MailDeliveryError::QuotaExceeded) => {
+                        &SmtpErrorCode::InsufficientSystemStorage
+                    }
+                    None => &SmtpErrorCode::TemporaryFailure,
+                };
+                return Err(SmtpResponseError::new(code));
+            }
+        };
+        info!(
+            recipient_count = notifications.len(),
+            subject = extract_subject(&email.content),
+            "Mail stored before DATA acknowledgement"
+        );
+        // Webhook URLs were captured under the same ownership lock as delivery.
+        // Slow or failed webhooks must not delay SMTP's successful response.
+        let otp = extract_otp(&email.content);
+        for (address, webhook) in notifications {
+            if let Some(url) = webhook {
+                let payload = Payload {
+                    version: 1,
+                    otp: otp.clone(),
+                    mail: address,
+                };
+                tokio::spawn(async move {
+                    if let Err(e) = send_webhook(&url, &payload).await {
+                        error!("Webhook delivery failed: {}", e);
+                    }
+                });
+            }
+        }
+        Ok(SmtpReply::data_accepted(SUCCESS_RESPONSE))
     }
 }
 
@@ -247,10 +227,16 @@ mod tests {
 
     #[test]
     fn test_extract_subject() {
-        assert_eq!(extract_subject("Subject: Hello World\n\nBody"), "Hello World");
+        assert_eq!(
+            extract_subject("Subject: Hello World\n\nBody"),
+            "Hello World"
+        );
         assert_eq!(extract_subject("subject: lowercase\n\nBody"), "lowercase");
         assert_eq!(extract_subject("No subject line\n\nBody"), "(no subject)");
-        assert_eq!(extract_subject("From: sender@test.com\nSubject: My Subject\n\nBody"), "My Subject");
+        assert_eq!(
+            extract_subject("From: sender@test.com\nSubject: My Subject\n\nBody"),
+            "My Subject"
+        );
     }
 
     #[test]

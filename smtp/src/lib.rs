@@ -24,8 +24,8 @@ pub async fn start_smtp_server(addr: SocketAddr, domain: String) {
     let db = Arc::new(DatabaseClient::connect().await.unwrap());
     let metrics = Arc::new(SmtpMetrics::new());
 
-    // Start background task to clear old mails every hour
-    clear_old_mails(db.clone(), Duration::from_secs(3600));
+    // Sweep expired mailboxes every minute.
+    clear_old_mails(db.clone(), Duration::from_secs(60));
     metrics::spawn_listener(metrics.clone());
 
     info!("Server started on Port: {}", addr);

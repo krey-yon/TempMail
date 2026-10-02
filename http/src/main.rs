@@ -8,7 +8,7 @@ mod validation_properties;
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, post},
     Router,
@@ -24,6 +24,73 @@ use tracing::{error, info, warn};
 use tracing_subscriber::fmt;
 use types::{ApiResponse, CreateEmailRequest, DeleteEmailResponse};
 use validation::UsernameValidator;
+use std::env;
+
+fn mailbox_token_from_headers(headers: &HeaderMap) -> Option<String> {
+    if let Some(value) = headers.get("x-mailbox-token") {
+        return value.to_str().ok().map(|s| s.to_string());
+    }
+    let auth = headers.get("authorization")?.to_str().ok()?;
+    let bearer = auth.strip_prefix("Bearer ").or_else(|| auth.strip_prefix("bearer "))?;
+    Some(bearer.to_string())
+}
+
+fn admin_authorized(headers: &HeaderMap) -> bool {
+    let Ok(expected) = env::var("ADMIN_TOKEN") else {
+        return false;
+    };
+    if expected.is_empty() {
+        return false;
+    }
+    let presented = headers
+        .get("x-admin-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if expected.len() != presented.len() {
+        return false;
+    }
+    expected
+        .bytes()
+        .zip(presented.bytes())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
+}
+
+async fn require_mailbox_token(
+    db: &Arc<DatabaseClient>,
+    address: &str,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    let Some(token) = mailbox_token_from_headers(headers) else {
+        return Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse::<()>::error("Mailbox token required".to_string())),
+            )
+                .into_response(),
+        );
+    };
+    match db.mailbox_token_matches(address, &token).await {
+        Ok(true) => None,
+        Ok(false) => Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse::<()>::error("Invalid mailbox token".to_string())),
+            )
+                .into_response(),
+        ),
+        Err(e) => {
+            error!("Failed to verify mailbox token: {}", e);
+            Some(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::<()>::error("Internal server error".to_string())),
+                )
+                    .into_response(),
+            )
+        }
+    }
+}
 
 async fn root() -> Json<ApiResponse<&'static str>> {
     Json(ApiResponse::success("Temp Mail HTTP API is running"))
@@ -52,8 +119,6 @@ async fn create_email(
     match db.create_email_address(&validated_username).await {
         Ok(email_address) => {
             info!("Email address created: {}", email_address.address);
-            // Track analytics
-            let _ = db.increment_analytics("email_address_created").await;
             (
                 StatusCode::CREATED,
                 Json(ApiResponse::success(email_address)),
@@ -65,7 +130,7 @@ async fn create_email(
             error!("Failed to create email address: {}", err_msg);
 
             // Check for specific error types and return appropriate status codes
-            let (status, message) = if err_msg.contains("already exists") || err_msg.contains("duplicate key") {
+            let (status, message) = if err_msg.contains("already exists") || err_msg.contains("already taken") || err_msg.contains("duplicate key") {
                 (StatusCode::CONFLICT, format!("Username '{}' is already taken. Please choose a different username.", validated_username))
             } else if err_msg.contains("server unavailable") || err_msg.contains("connection") {
                 (StatusCode::SERVICE_UNAVAILABLE, "Database server is temporarily unavailable. Please try again later.".to_string())
@@ -85,6 +150,7 @@ async fn create_email(
 async fn delete_email_address(
     Path(address): Path<String>,
     State(db): State<Arc<DatabaseClient>>,
+    headers: HeaderMap,
 ) -> Response {
     info!("Deleting email address: {}", address);
 
@@ -98,8 +164,12 @@ async fn delete_email_address(
             .into_response();
     }
 
+    if let Some(denied) = require_mailbox_token(&db, &address, &headers).await {
+        return denied;
+    }
+
     // Delete email address
-    match db.delete_email_address(&address).await {
+    match db.delete_email_address(&address, &mailbox_token_from_headers(&headers).unwrap_or_default()).await {
         Ok(true) => {
             info!("Email address deleted: {}", address);
             (
@@ -134,7 +204,16 @@ async fn delete_email_address(
     }
 }
 
-async fn list_emails(State(db): State<Arc<DatabaseClient>>) -> Response {
+async fn list_emails(State(db): State<Arc<DatabaseClient>>, headers: HeaderMap) -> Response {
+    if !admin_authorized(&headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiResponse::<Vec<EmailAddressInfo>>::error(
+                "Admin token required".to_string(),
+            )),
+        )
+            .into_response();
+    }
     info!("Listing all email addresses");
 
     match db.list_email_addresses().await {
@@ -155,7 +234,16 @@ async fn list_emails(State(db): State<Arc<DatabaseClient>>) -> Response {
     }
 }
 
-async fn list_registry(State(db): State<Arc<DatabaseClient>>) -> Response {
+async fn list_registry(State(db): State<Arc<DatabaseClient>>, headers: HeaderMap) -> Response {
+    if !admin_authorized(&headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiResponse::<Vec<EmailRegistryEntry>>::error(
+                "Admin token required".to_string(),
+            )),
+        )
+            .into_response();
+    }
     info!("Listing registered usernames");
 
     match db.list_registered_usernames().await {
@@ -178,6 +266,7 @@ async fn list_registry(State(db): State<Arc<DatabaseClient>>) -> Response {
 
 #[derive(serde::Serialize)]
 struct StatsResponse {
+    total_addresses_created: i64,
     total_addresses: i64,
     total_emails: i64,
     total_webhooks: i64,
@@ -191,6 +280,7 @@ async fn get_stats(State(db): State<Arc<DatabaseClient>>) -> Response {
         Ok(stats) => {
             let events = db.get_analytics().await.unwrap_or_default();
             let response = StatsResponse {
+                total_addresses_created: stats.total_addresses_created,
                 total_addresses: stats.total_email_addresses,
                 total_emails: stats.total_emails_received,
                 total_webhooks: stats.total_webhooks_configured,
@@ -214,16 +304,26 @@ async fn get_stats(State(db): State<Arc<DatabaseClient>>) -> Response {
 async fn get_emails(
     Path(address): Path<String>,
     State(db): State<Arc<DatabaseClient>>,
-) -> Json<ApiResponse<Vec<MailRow>>> {
-    match db.get_mails_by_recipient(&address).await {
+    headers: HeaderMap,
+) -> Response {
+    if let Some(denied) = require_mailbox_token(&db, &address, &headers).await {
+        return denied;
+    }
+    match db.get_mails_by_recipient(&address, &mailbox_token_from_headers(&headers).unwrap_or_default()).await {
         Ok(mails) => {
             // Track email fetch
             let _ = db.increment_analytics("emails_fetched").await;
-            Json(ApiResponse::success(mails))
+            (StatusCode::OK, Json(ApiResponse::success(mails))).into_response()
         }
         Err(e) => {
             error!("Failed to get emails: {}", e);
-            Json(ApiResponse::error(e.to_string()))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<Vec<MailRow>>::error(
+                    "Internal server error".to_string(),
+                )),
+            )
+                .into_response()
         }
     }
 }
@@ -231,21 +331,39 @@ async fn get_emails(
 async fn get_email(
     Path((address, id)): Path<(String, String)>,
     State(db): State<Arc<DatabaseClient>>,
-) -> Json<ApiResponse<MailRow>> {
-    match db.get_mail_by_id(&id).await {
+    headers: HeaderMap,
+) -> Response {
+    if let Some(denied) = require_mailbox_token(&db, &address, &headers).await {
+        return denied;
+    }
+    match db.get_mail_by_id(&id, &address, &mailbox_token_from_headers(&headers).unwrap_or_default()).await {
         Ok(Some(mail)) => {
             if mail.recipients == address {
-                Json(ApiResponse::success(mail))
+                (StatusCode::OK, Json(ApiResponse::success(mail))).into_response()
             } else {
-                Json(ApiResponse::error(
-                    "Email not found for this address".to_string(),
-                ))
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ApiResponse::<MailRow>::error(
+                        "Email not found for this address".to_string(),
+                    )),
+                )
+                    .into_response()
             }
         }
-        Ok(None) => Json(ApiResponse::error("Email not found".to_string())),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::<MailRow>::error("Email not found".to_string())),
+        )
+            .into_response(),
         Err(e) => {
             error!("Failed to get email: {}", e);
-            Json(ApiResponse::error(e.to_string()))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<MailRow>::error(
+                    "Internal server error".to_string(),
+                )),
+            )
+                .into_response()
         }
     }
 }
@@ -253,29 +371,49 @@ async fn get_email(
 async fn delete_email(
     Path((address, id)): Path<(String, String)>,
     State(db): State<Arc<DatabaseClient>>,
-) -> Json<ApiResponse<()>> {
-    match db.get_mail_by_id(&id).await {
+    headers: HeaderMap,
+) -> Response {
+    if let Some(denied) = require_mailbox_token(&db, &address, &headers).await {
+        return denied;
+    }
+    match db.get_mail_by_id(&id, &address, &mailbox_token_from_headers(&headers).unwrap_or_default()).await {
         Ok(Some(mail)) => {
             if mail.recipients != address {
-                return Json(ApiResponse::error(
-                    "Email not found for this address".to_string(),
-                ));
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ApiResponse::<()>::error(
+                        "Email not found for this address".to_string(),
+                    )),
+                )
+                    .into_response();
             }
         }
         Ok(None) => {
-            return Json(ApiResponse::error("Email not found".to_string()));
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::<()>::error("Email not found".to_string())),
+            )
+                .into_response();
         }
         Err(e) => {
             error!("Failed to get email: {}", e);
-            return Json(ApiResponse::error(e.to_string()));
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::error("Internal server error".to_string())),
+            )
+                .into_response();
         }
     }
 
-    match db.delete_mail(&id).await {
-        Ok(_) => Json(ApiResponse::success(())),
+    match db.delete_mail(&id, &address, &mailbox_token_from_headers(&headers).unwrap_or_default()).await {
+        Ok(_) => (StatusCode::OK, Json(ApiResponse::success(()))).into_response(),
         Err(e) => {
             error!("Failed to delete email: {}", e);
-            Json(ApiResponse::error(e.to_string()))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::error("Internal server error".to_string())),
+            )
+                .into_response()
         }
     }
 }
@@ -363,5 +501,49 @@ mod tests {
         let response = root().await;
         assert!(response.success);
         assert_eq!(response.data, Some("Temp Mail HTTP API is running"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated PostgreSQL database configured through DB_* variables"]
+    async fn test_creation_conflicts_reuse_and_public_lifetime_stats() {
+        assert!(env::var("DB_NAME").unwrap().ends_with("_test"), "use an isolated test database");
+        let db = Arc::new(DatabaseClient::connect().await.unwrap());
+        let baseline = db.get_total_stats().await.unwrap().total_addresses_created;
+        let suffix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let username = format!("http{suffix}");
+        let response = create_email(State(db.clone()), Json(CreateEmailRequest { username: username.clone() })).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let address = body["data"]["address"].as_str().unwrap();
+        let token = body["data"]["access_token"].as_str().unwrap();
+        let response = create_email(State(db.clone()), Json(CreateEmailRequest { username: username.clone() })).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        // Exercise the public route and serialized field that the client consumes.
+        use tower::ServiceExt;
+        let app = Router::new().route("/api/stats", get(get_stats)).with_state(db.clone());
+        let response = app.oneshot(axum::http::Request::builder().uri("/api/stats").body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let stats: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(stats["success"], true);
+        assert_eq!(stats["data"]["total_addresses_created"], baseline + 1);
+
+        db.pool.get().await.unwrap().execute(
+            "UPDATE email_addresses SET created_at = ((clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours')::text WHERE address = $1", &[&address],
+        ).await.unwrap();
+        let response = create_email(State(db.clone()), Json(CreateEmailRequest { username })).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let replacement: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let new_token = replacement["data"]["access_token"].as_str().unwrap();
+        assert_ne!(token, new_token);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-mailbox-token", token.parse().unwrap());
+        let response = get_emails(Path(address.to_string()), State(db.clone()), headers).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(db.delete_email_address(address, new_token).await.unwrap());
+        assert_eq!(db.get_total_stats().await.unwrap().total_addresses_created, baseline + 2);
     }
 }
