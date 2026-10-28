@@ -171,3 +171,50 @@ For checks without PostgreSQL, run `cargo test --workspace`.
 ## CORS
 
 Allowed origins: `https://www.xelio.me`, `localhost:*`
+
+## Request inspector (abuse triage)
+
+Mailbox creation is unauthenticated by design, so the API can be driven directly
+by scripts even when the web app shows no traffic. To make that attributable, the
+HTTP service keeps a bounded in-memory log of recent requests and exposes it
+behind the admin token:
+
+| Route | Auth | Purpose |
+|-------|------|---------|
+| `GET /admin` | none (page only) | Inspector UI |
+| `GET /api/admin/requests?limit=500&creates_only=true` | `x-admin-token` | Raw rows |
+| `GET /api/admin/requests/geo?limit=500&creates_only=true` | `x-admin-token` | Rows enriched with country/city/ASN |
+
+Each row records time, client IP, method, path, status, latency, user agent,
+`Origin`, and `Referer`. `POST /api/emails` also emits one structured log line
+with `ip`, `ua`, `status`, and `ms`, and rate-limited requests log a `rate
+limited` warning, so the Coolify log stream keeps carrying attribution data
+after the in-memory buffer rotates.
+
+Client IP is read from `X-Forwarded-For` (first entry), then `X-Real-IP`. This is
+only safe because Coolify's Traefik replaces inbound `X-Forwarded-For` with the
+peer address instead of trusting it; keep that behaviour if the proxy changes.
+
+The buffer holds the newest 10,000 requests and resets on deploy. Geo lookup uses
+ip-api.com in batches of 100 unique IPs (max 500 per request) with a 24-hour
+cache. Disable it by setting `GEO_API_URL=` (empty) if you do not want IPs sent
+to a third party.
+
+### Admin panel
+
+`GET /admin-panel` serves a server-rendered operations panel for the same
+in-memory data. It is separate from the `/admin` inspector and needs no
+JavaScript, CDN assets, or admin token.
+
+Set `ADMIN_PANEL_PASSWORD` to enable it. If the variable is unset or empty, every
+panel route returns `503`; there is no default password. Sign in at
+`POST /admin-panel/login` (form field `password`), and sign out with the POST
+form in the panel header (`POST /admin-panel/logout`). Successful login sets
+`xelio_panel`, an `HttpOnly; Secure; SameSite=Strict` cookie with a 12-hour
+session; sessions live in process memory and reset on deploy. Failed logins are
+counted per client IP, and 8 failures in 10 minutes return `429` until the
+window expires. The passed password is never logged.
+
+The dashboard supports `?q=`, `?country=` (exact country code), `?creates_only=`,
+`?limit=` (default 200, max 1000), and `?refresh=1` for a 30-second meta refresh.
+

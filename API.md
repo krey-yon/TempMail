@@ -305,9 +305,7 @@ Get usage statistics including total addresses, emails, webhooks, and event coun
 
 ```
 GET /api/stats
-```
-
-**Success Response (200 OK):**
+```**Success Response (200 OK):**
 ```json
 {
     "success": true,
@@ -343,6 +341,56 @@ GET /api/stats
 | total_emails | integer | Total number of emails received |
 | total_webhooks | integer | Number of addresses with webhooks configured |
 | events | array | List of tracked events with counts |
+
+---
+
+### Request Inspector (admin)
+
+Records recent requests so direct-to-API abuse can be attributed to an IP. Both
+endpoints require `x-admin-token: $ADMIN_TOKEN`.
+
+```
+GET /api/admin/requests?limit=500&creates_only=true
+GET /api/admin/requests/geo?limit=500&creates_only=true
+```
+
+`creates_only` defaults to `true` and filters to `POST /api/emails`. `limit`
+defaults to 500 and is capped at 10,000 (the ring buffer size). The `geo`
+variant adds `geo` per row (`country`, `countryCode`, `regionName`, `city`,
+`isp`, `org`, `as`, `mobile`, `proxy`, `hosting`) from a 24-hour cache backed by
+ip-api.com batch lookups.
+
+**Success Response (200 OK):**
+```json
+{
+    "success": true,
+    "data": [
+        {
+            "at": "2026-10-28T05:06:09.772Z",
+            "ip": "203.0.113.10",
+            "method": "POST",
+            "path": "/api/emails",
+            "status": 201,
+            "ms": 8,
+            "user_agent": "python-requests/2.32.3",
+            "geo": {
+                "country": "Netherlands",
+                "countryCode": "NL",
+                "regionName": "North Holland",
+                "city": "Amsterdam",
+                "asn": "AS20773 Host Europe GmbH",
+                "hosting": true,
+                "proxy": false,
+                "mobile": false
+            }
+        }
+    ],
+    "error": null
+}
+```
+
+The human-readable UI is served at `GET /admin` and calls the `geo` endpoint
+same-origin with the token held in browser storage.
 
 ---
 
@@ -484,8 +532,8 @@ All HTTP API responses follow this structure:
 
 ## Rate Limiting (DDoS Protection)
 
-- **Limit:** 100 requests per second per IP address
-- **Burst:** Up to 150 requests
+- **Limit:** 200 requests per second per IP address
+- **Burst:** Up to 250 requests
 - **Status:** Enabled
 - **Implementation:** tower-governor with SmartIpKeyExtractor
 

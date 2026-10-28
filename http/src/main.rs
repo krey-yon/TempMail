@@ -1,3 +1,5 @@
+mod access_log;
+mod admin_panel;
 mod types;
 mod validation;
 mod scheduler;
@@ -7,9 +9,10 @@ mod webhook;
 mod validation_properties;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json, Response},
+    middleware,
+    response::{Html, IntoResponse, Json, Response},
     routing::{delete, get, post},
     Router,
 };
@@ -35,7 +38,7 @@ fn mailbox_token_from_headers(headers: &HeaderMap) -> Option<String> {
     Some(bearer.to_string())
 }
 
-fn admin_authorized(headers: &HeaderMap) -> bool {
+pub(crate) fn admin_authorized(headers: &HeaderMap) -> bool {
     let Ok(expected) = env::var("ADMIN_TOKEN") else {
         return false;
     };
@@ -418,12 +421,17 @@ async fn delete_email(
     }
 }
 
+async fn admin_page() -> Html<&'static str> {
+    Html(include_str!("../static/admin.html"))
+}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
     fmt::init();
 
     let db = Arc::new(DatabaseClient::connect().await.unwrap());
+    let access_log = Arc::new(access_log::AccessLog::new(10_000));
 
     // Start cleanup scheduler
     if let Err(e) = scheduler::start_cleanup_scheduler(db.clone()).await {
@@ -458,6 +466,10 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(root))
+        .route("/admin", get(admin_page))
+        .route("/admin-panel", get(admin_panel::page))
+        .route("/admin-panel/login", post(admin_panel::login))
+        .route("/admin-panel/logout", post(admin_panel::logout))
         .route("/api/emails", post(create_email))
         .route("/api/emails", get(list_emails))
         .route("/api/emails/:address", delete(delete_email_address))
@@ -466,7 +478,17 @@ async fn main() {
         .route("/api/emails/:address/:id", delete(delete_email))
         .route("/api/stats", get(get_stats))
         .route("/api/admin/registry", get(list_registry))
+        .route("/api/admin/requests", get(access_log::list_requests))
+        .route(
+            "/api/admin/requests/geo",
+            get(access_log::list_requests_geo),
+        )
         .layer(governor_layer)
+        .layer(middleware::from_fn_with_state(
+            access_log.clone(),
+            access_log::record_request,
+        ))
+        .layer(Extension(access_log))
         .with_state(db)
         .layer(cors);
 

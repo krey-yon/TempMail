@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Xelio · Request Inspector</title>
+<style>
+  :root {
+    --bg: #0c0c0b;
+    --panel: #131312;
+    --panel-2: #191918;
+    --line: #262624;
+    --ink: #edeae2;
+    --muted: #8b8880;
+    --dim: #635f58;
+    --accent: #d9f27e;
+    --warn: #f2b06b;
+    --bad: #f27e7e;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); }
+  body { font-size: 14px; -webkit-font-smoothing: antialiased; }
+  a { color: var(--accent); }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 28px 24px 80px; }
+
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 22px; }
+  h1 { font-size: 19px; font-weight: 600; letter-spacing: -.01em; margin: 0; }
+  h1 span { color: var(--dim); font-weight: 400; }
+  .status { font-family: var(--mono); font-size: 11px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
+  .dot.live { background: var(--accent); box-shadow: 0 0 0 3px rgba(217,242,126,.12); }
+
+  .gate { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 28px; max-width: 460px; }
+  .gate p { color: var(--muted); line-height: 1.55; margin: 0 0 18px; }
+  .row { display: flex; gap: 8px; }
+  input[type=password], input[type=text] {
+    flex: 1; background: var(--panel-2); border: 1px solid var(--line); color: var(--ink);
+    border-radius: 8px; padding: 10px 12px; font-family: var(--mono); font-size: 13px; outline: none;
+  }
+  input:focus { border-color: #4b4a44; }
+  button {
+    background: var(--accent); color: #10120a; border: 0; border-radius: 8px;
+    padding: 10px 16px; font-weight: 600; font-size: 13px; cursor: pointer; font-family: var(--sans);
+  }
+  button:hover { filter: brightness(1.06); }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); font-weight: 500; }
+  button.ghost:hover { color: var(--ink); border-color: #3c3b36; }
+  .err { color: var(--bad); font-family: var(--mono); font-size: 12px; margin-top: 12px; min-height: 16px; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); gap: 12px; margin-bottom: 22px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .card .k { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .07em; margin-bottom: 8px; }
+  .card .v { font-size: 22px; font-weight: 600; font-family: var(--mono); letter-spacing: -.02em; }
+  .card .s { font-size: 11px; color: var(--muted); margin-top: 4px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .split { display: grid; grid-template-columns: 320px 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0; padding: 14px 16px; border-bottom: 1px solid var(--line); font-weight: 500; }
+
+  .bars { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .bar { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; }
+  .bar .label { font-family: var(--mono); font-size: 12px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar .n { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .bar .track { grid-column: 1 / -1; height: 5px; background: var(--panel-2); border-radius: 999px; overflow: hidden; }
+  .bar .fill { height: 100%; background: var(--accent); border-radius: 999px; opacity: .75; }
+  .empty { padding: 16px; color: var(--dim); font-family: var(--mono); font-size: 12px; }
+
+  .toolbar { display: flex; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; align-items: center; }
+  .toolbar input[type=text] { max-width: 280px; flex: 1 1 180px; }
+  .toggle { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; color: var(--muted); user-select: none; }
+  .toggle input { accent-color: var(--accent); }
+  .spacer { flex: 1; }
+
+  .table-wrap { max-height: 66vh; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  thead th {
+    position: sticky; top: 0; background: var(--panel-2); z-index: 2;
+    text-align: left; font-weight: 500; color: var(--dim); font-size: 10px;
+    text-transform: uppercase; letter-spacing: .07em; padding: 9px 12px; border-bottom: 1px solid var(--line);
+    cursor: pointer; white-space: nowrap;
+  }
+  tbody td { padding: 9px 12px; border-bottom: 1px solid #1d1d1c; vertical-align: top; }
+  tbody tr:hover { background: #171716; }
+  td.ip { color: var(--ink); white-space: nowrap; }
+  td.ip b { font-weight: 500; }
+  .flag { margin-right: 6px; }
+  .muted { color: var(--muted); }
+  .dim { color: var(--dim); }
+  .trunc { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; margin-left: 6px; letter-spacing: .02em; }
+  .badge.host { background: rgba(242,176,107,.12); color: var(--warn); border: 1px solid rgba(242,176,107,.25); }
+  .badge.proxy { background: rgba(242,126,126,.12); color: var(--bad); border: 1px solid rgba(242,126,126,.25); }
+  .badge.mobile { background: rgba(217,242,126,.1); color: var(--accent); border: 1px solid rgba(217,242,126,.22); }
+  .status-2 { color: var(--accent); }
+  .status-4 { color: var(--warn); }
+  .status-5 { color: var(--bad); }
+  .note { font-size: 11px; color: var(--dim); font-family: var(--mono); line-height: 1.6; margin-top: 14px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Xelio <span>· request inspector</span></h1>
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">locked</span></div>
+  </header>
+
+  <section class="gate" id="gate">
+    <p>Paste the <code>ADMIN_TOKEN</code> configured on the API. It is kept in this browser only and sent as <code>x-admin-token</code>.</p>
+    <div class="row">
+      <input type="password" id="token" placeholder="admin token" autocomplete="off" spellcheck="false">
+      <button id="unlock">Unlock</button>
+    </div>
+    <div class="err" id="gateErr"></div>
+  </section>
+
+  <main id="app" class="hidden">
+    <div class="cards" id="cards"></div>
+
+    <div class="split">
+      <div>
+        <div class="panel">
+          <h2>Top countries</h2>
+          <div class="bars" id="countries"></div>
+        </div>
+        <div class="panel" style="margin-top:16px">
+          <h2>Top networks</h2>
+          <div class="bars" id="networks"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="toolbar">
+          <input type="text" id="filter" placeholder="filter ip, country, asn, ua…">
+          <label class="toggle"><input type="checkbox" id="createsOnly" checked> creates only</label>
+          <label class="toggle"><input type="checkbox" id="auto" checked> auto 30s</label>
+          <span class="spacer"></span>
+          <button class="ghost" id="refresh">Refresh</button>
+          <button class="ghost" id="csv">CSV</button>
+          <button class="ghost" id="lock">Lock</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th data-sort="at">Time</th>
+                <th data-sort="ip">IP</th>
+                <th data-sort="country">Location</th>
+                <th data-sort="asn">Network</th>
+                <th data-sort="method">Request</th>
+                <th data-sort="status">Status</th>
+                <th data-sort="user_agent">User agent</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="tableEmpty">No requests captured yet. Data starts after this build is deployed.</div>
+      </div>
+    </div>
+
+    <div class="note" id="note"></div>
+  </main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const KEY = "xelio_admin_token";
+  const $ = (id) => document.getElementById(id);
+  let data = [];
+  let sort = { key: "at", dir: -1 };
+  let timer = null;
+
+  const flag = (cc) => cc && cc.length === 2
+    ? String.fromCodePoint(...[...cc.toUpperCase()].map((c) => 127397 + c.charCodeAt(0)))
+    : "";
+
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  function ago(iso) {
+    const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 60) return Math.floor(s) + "s ago";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+  const clock = (iso) => new Date(iso).toISOString().slice(11, 23);
+
+  function token() { return localStorage.getItem(KEY) || ""; }
+
+  async function load() {
+    const t = token();
+    if (!t) return;
+    const only = $("createsOnly").checked;
+    setStatus("loading", false);
+    try {
+      const res = await fetch("/api/admin/requests/geo?limit=500&creates_only=" + only, {
+        headers: { "x-admin-token": t },
+      });
+      if (res.status === 401) { lock("Token rejected."); return; }
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const json = await res.json();
+      data = json.data || [];
+      render();
+      setStatus("live · " + data.length + " rows", true);
+      $("gateErr").textContent = "";
+    } catch (e) {
+      setStatus("error: " + e.message, false);
+    }
+  }
+
+  function setStatus(text, live) {
+    $("statusText").textContent = text;
+    $("dot").className = "dot" + (live ? " live" : "");
+  }
+
+  function lock(msg) {
+    localStorage.removeItem(KEY);
+    data = [];
+    $("app").classList.add("hidden");
+    $("gate").classList.remove("hidden");
+    $("gateErr").textContent = msg || "";
+    setStatus("locked", false);
+    if (timer) { clearInterval(timer); timer = null; }
+  }
+
+  function row(v, key) {
+    if (key === "country") return (v.geo && v.geo.country) || "";
+    if (key === "asn") return (v.geo && (v.geo.asn || v.geo.isp)) || "";
+    return v[key] == null ? "" : String(v[key]);
+  }
+
+  function visible() {
+    const q = $("filter").value.trim().toLowerCase();
+    let rows = data;
+    if (q) {
+      rows = rows.filter((r) => {
+        const g = r.geo || {};
+        return [r.ip, r.method, r.path, r.user_agent, g.country, g.country_code, g.city, g.region, g.asn, g.isp, g.org]
+          .join(" ").toLowerCase().includes(q);
+      });
+    }
+    rows = rows.slice().sort((a, b) => {
+      const av = row(a, sort.key), bv = row(b, sort.key);
+      if (sort.key === "status") return (a.status - b.status) * sort.dir;
+      return String(av).localeCompare(String(bv)) * sort.dir;
+    });
+    return rows;
+  }
+
+  function bars(el, counts, total) {
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    if (!top.length) { el.innerHTML = '<div class="empty">No geo data</div>'; return; }
+    const max = top[0][1];
+    el.innerHTML = top.map(([label, n]) => `
+      <div class="bar">
+        <span class="label">${esc(label)}</span>
+        <span class="n">${n} · ${Math.round((n / total) * 100)}%</span>
+        <span class="track"><span class="fill" style="width:${Math.max(4, (n / max) * 100)}%"></span></span>
+      </div>`).join("");
+  }
+
+  function summary(rows) {
+    const ips = new Set(), countries = {}, networks = {};
+    let hosting = 0, mobile = 0, geo = 0;
+    for (const r of rows) {
+      ips.add(r.ip);
+      const g = r.geo;
+      if (!g) continue;
+      if (g.country) { geo++; countries[(g.country_code ? flag(g.country_code) + " " : "") + g.country] = (countries[(g.country_code ? flag(g.country_code) + " " : "") + g.country] || 0) + 1; }
+      if (g.asn || g.isp) networks[g.asn || g.isp] = (networks[g.asn || g.isp] || 0) + 1;
+      if (g.hosting) hosting++;
+      if (g.mobile) mobile++;
+    }
+    const topCountry = Object.entries(countries).sort((a, b) => b[1] - a[1])[0];
+    return { ips: ips.size, countries, networks, hosting, mobile, geo, topCountry };
+  }
+
+  function render() {
+    const rows = visible();
+    const s = summary(data);
+    const cards = [
+      ["Rows", data.length, $("createsOnly").checked ? "mailbox creations" : "all requests"],
+      ["Unique IPs", s.ips, "in this window"],
+      ["Countries", Object.keys(s.countries).length, s.topCountry ? "top " + s.topCountry[0] : "no geo yet"],
+      ["Datacenter / VPN", s.geo ? Math.round((s.hosting / s.geo) * 100) + "%" : "—", "hosting flag from geo"],
+      ["Mobile", s.geo ? Math.round((s.mobile / s.geo) * 100) + "%" : "—", "mobile carrier flag"],
+    ];
+    $("cards").innerHTML = cards.map(([k, v, sub]) =>
+      `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`).join("");
+
+    bars($("countries"), s.countries, Math.max(1, s.geo));
+    bars($("networks"), s.networks, Math.max(1, s.geo));
+
+    $("rows").innerHTML = rows.map((r) => {
+      const g = r.geo || {};
+      const loc = g.country
+        ? `<span class="flag">${flag(g.country_code)}</span>${esc(g.city || g.region || g.country)}<div class="dim">${esc(g.country)}</div>`
+        : `<span class="dim">unknown</span>`;
+      const net = (g.asn || g.isp)
+        ? `${esc((g.asn || "").replace(/^AS/, "AS"))}<div class="dim trunc" title="${esc(g.isp || g.org || "")}">${esc(g.isp || g.org || "")}</div>`
+        : `<span class="dim">—</span>`;
+      const badges = (g.hosting ? '<span class="badge host">hosting</span>' : "") +
+        (g.proxy ? '<span class="badge proxy">proxy</span>' : "") +
+        (g.mobile ? '<span class="badge mobile">mobile</span>' : "");
+      const cls = r.status >= 500 ? "status-5" : r.status >= 400 ? "status-4" : "status-2";
+      return `<tr>
+        <td title="${esc(new Date(r.at).toISOString())}">${esc(ago(r.at))}<div class="dim">${esc(clock(r.at))}</div></td>
+        <td class="ip"><b>${esc(r.ip)}</b></td>
+        <td>${loc}</td>
+        <td>${net}${badges}</td>
+        <td>${esc(r.method)} <span class="muted">${esc(r.path)}</span><div class="dim">${r.ms}ms</div></td>
+        <td class="${cls}">${r.status}</td>
+        <td class="trunc" title="${esc(r.user_agent)}">${esc(r.user_agent || "—")}</td>
+      </tr>`;
+    }).join("");
+
+    $("tableEmpty").classList.toggle("hidden", rows.length > 0);
+    const geoMissing = data.filter((r) => !r.geo).length;
+    $("note").textContent =
+      "Window: last " + data.length + " captured requests, newest first. " +
+      (geoMissing ? geoMissing + " row(s) have no geo result (private/bogon IP or geo provider rate limit). " : "") +
+      "Geo comes from ip-api.com, cached for 24h. In-memory buffer holds 2,000 requests and resets on deploy.";
+  }
+
+  $("unlock").addEventListener("click", () => {
+    const v = $("token").value.trim();
+    if (!v) return;
+    localStorage.setItem(KEY, v);
+    $("gate").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    load();
+    if (timer) clearInterval(timer);
+    timer = setInterval(() => { if ($("auto").checked) load(); }, 30000);
+  });
+  $("token").addEventListener("keydown", (e) => { if (e.key === "Enter") $("unlock").click(); });
+  $("refresh").addEventListener("click", load);
+  $("createsOnly").addEventListener("change", load);
+  $("filter").addEventListener("input", render);
+  $("lock").addEventListener("click", () => lock(""));
+  document.querySelectorAll("th[data-sort]").forEach((th) => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.sort;
+      sort = { key, dir: sort.key === key ? -sort.dir : -1 };
+      render();
+    });
+  });
+  $("csv").addEventListener("click", () => {
+    const head = ["time", "ip", "country", "country_code", "region", "city", "asn", "isp", "hosting", "proxy", "mobile", "method", "path", "status", "ms", "user_agent"];
+    const lines = [head.join(",")].concat(visible().map((r) => {
+      const g = r.geo || {};
+      return [r.at, r.ip, g.country, g.country_code, g.region, g.city, g.asn, g.isp, g.hosting, g.proxy, g.mobile, r.method, r.path, r.status, r.ms, r.user_agent]
+        .map((v) => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"').join(",");
+    }));
+    const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = "xelio-requests-" + Date.now() + ".csv"; a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  if (token()) {
+    $("gate").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    load();
+    timer = setInterval(() => { if ($("auto").checked) load(); }, 30000);
+  }
+})();
+</script>
+</body>
+</html>
