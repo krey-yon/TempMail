@@ -11,10 +11,22 @@ use crate::{
     webhook::{extract_otp, send_webhook, Payload},
 };
 
-const MAX_EMAIL_SIZE: usize = 10_485_760;
+const DEFAULT_MAX_EMAIL_SIZE: usize = 2 * 1024 * 1024;
+const MIN_MAX_EMAIL_SIZE: usize = 64 * 1024;
+const MAX_MAX_EMAIL_SIZE: usize = 25 * 1024 * 1024;
 const SUCCESS_RESPONSE: &[u8] = b"250 Ok\r\n";
 const MAX_RECIPIENT_COUNT: usize = 100;
 const DATA_READY_PROMPT: &[u8] = b"354 End data with <CR><LF>.<CR><LF>\r\n";
+
+fn parse_max_email_size(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| (MIN_MAX_EMAIL_SIZE..=MAX_MAX_EMAIL_SIZE).contains(value))
+        .unwrap_or(DEFAULT_MAX_EMAIL_SIZE)
+}
+
+fn max_email_size() -> usize {
+    parse_max_email_size(std::env::var("MAX_EMAIL_SIZE_BYTES").ok().as_deref())
+}
 
 fn extract_subject(content: &str) -> String {
     content
@@ -39,14 +51,14 @@ pub struct HandleCurrentState {
 impl HandleCurrentState {
     pub fn new(server_domain: impl AsRef<str>) -> Self {
         let server_domain = server_domain.as_ref();
+        let max_email_size = max_email_size();
         let greeting_message = format!(
-            "250-{server_domain} greets {server_domain}\r\n250-SIZE {}\r\n250 8BITMIME\r\n",
-            MAX_EMAIL_SIZE
+            "250-{server_domain} greets {server_domain}\r\n250-SIZE {max_email_size}\r\n250 8BITMIME\r\n"
         );
         Self {
             current_state: CurrentStates::Initial,
             greeting_message,
-            max_email_size: MAX_EMAIL_SIZE,
+            max_email_size,
             server_domain: server_domain.to_string(),
         }
     }
@@ -241,7 +253,28 @@ mod tests {
 
     #[test]
     fn test_max_email_size() {
-        assert_eq!(MAX_EMAIL_SIZE, 10_485_760); // 10MB
+        // The default is 2 MiB and must sit inside the accepted envelope.
+        assert_eq!(DEFAULT_MAX_EMAIL_SIZE, 2 * 1024 * 1024);
+        assert!(DEFAULT_MAX_EMAIL_SIZE >= MIN_MAX_EMAIL_SIZE);
+        assert!(DEFAULT_MAX_EMAIL_SIZE <= MAX_MAX_EMAIL_SIZE);
+        // Missing, unparsable, and out-of-range values fall back to the default.
+        assert_eq!(parse_max_email_size(None), DEFAULT_MAX_EMAIL_SIZE);
+        assert_eq!(parse_max_email_size(Some("nope")), DEFAULT_MAX_EMAIL_SIZE);
+        assert_eq!(parse_max_email_size(Some("1024")), DEFAULT_MAX_EMAIL_SIZE);
+        assert_eq!(
+            parse_max_email_size(Some("268435456")),
+            DEFAULT_MAX_EMAIL_SIZE
+        );
+        // Values inside the envelope are honoured.
+        assert_eq!(parse_max_email_size(Some("1048576")), 1_048_576);
+        assert_eq!(
+            parse_max_email_size(Some(&MIN_MAX_EMAIL_SIZE.to_string())),
+            MIN_MAX_EMAIL_SIZE
+        );
+        assert_eq!(
+            parse_max_email_size(Some(&MAX_MAX_EMAIL_SIZE.to_string())),
+            MAX_MAX_EMAIL_SIZE
+        );
     }
 
     #[test]

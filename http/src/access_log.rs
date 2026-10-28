@@ -51,6 +51,16 @@ pub struct Record {
     pub referer: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowStats {
+    /// `POST /api/emails` answered with 201.
+    pub creates: u64,
+    /// `POST /api/emails` answered with a 4xx (validation, conflict, challenge, quota).
+    pub rejected_creates: u64,
+    /// Any request answered with 429.
+    pub rate_limited: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Geo {
     #[serde(default)]
@@ -159,6 +169,59 @@ impl AccessLog {
             .take(limit)
             .cloned()
             .collect()
+    }
+
+    /// Counts of the events the alerting job watches, restricted to the last
+    /// `window`. Timestamps are RFC 3339 in UTC, so a string comparison is a
+    /// valid time comparison and avoids parsing every record.
+    pub fn stats_since(&self, window: Duration) -> WindowStats {
+        let seconds = window.as_secs().min(i64::MAX as u64) as i64;
+        let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(seconds))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+        let entries = match self.entries.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let mut stats = WindowStats::default();
+        for record in entries.iter().rev() {
+            if record.at.as_str() < cutoff.as_str() {
+                break;
+            }
+            if record.method == "POST" && record.path == "/api/emails" {
+                match record.status {
+                    201 => stats.creates += 1,
+                    // 4xx on create means a client was turned away: the abuse
+                    // signal for Turnstile, quotas and validation.
+                    400..=499 => stats.rejected_creates += 1,
+                    _ => {}
+                }
+            }
+            if record.status == 429 {
+                stats.rate_limited += 1;
+            }
+        }
+        stats
+    }
+
+    /// Distinct client IPs seen in the last `window`.
+    pub fn distinct_ips_since(&self, window: Duration) -> usize {
+        let seconds = window.as_secs().min(i64::MAX as u64) as i64;
+        let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(seconds))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let entries = match self.entries.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut ips: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for record in entries.iter().rev() {
+            if record.at.as_str() < cutoff.as_str() {
+                break;
+            }
+            ips.insert(record.ip.as_str());
+        }
+        ips.len()
     }
 
     async fn geolocate(&self, ips: Vec<String>) -> HashMap<String, Geo> {

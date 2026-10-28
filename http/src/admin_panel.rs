@@ -343,7 +343,7 @@ fn place(geo: &Geo) -> String {
         .country
         .as_deref()
         .filter(|value| !value.is_empty())
-        .or_else(|| geo.country_code.as_deref())
+        .or(geo.country_code.as_deref())
     {
         parts.push(esc(country));
     }
@@ -699,15 +699,13 @@ fn html_response(status: StatusCode, body: String) -> Response {
 // ---------------------------------------------------------------------------
 
 fn render_disabled() -> Response {
-    let body = format!(
-        "<main class=\"note-box\"><h1>Admin panel disabled</h1>\
+    let body = "<main class=\"note-box\"><h1>Admin panel disabled</h1>\
 <p>The panel is gated by <code>ADMIN_PANEL_PASSWORD</code>, which is not set on this server.</p>\
 <p>Set the environment variable and restart the HTTP service. The panel fails closed and \
-never uses a default password.</p></main>"
-    );
+never uses a default password.</p></main>";
     html_response(
         StatusCode::SERVICE_UNAVAILABLE,
-        shell("Admin panel disabled", &body, None),
+        shell("Admin panel disabled", body, None),
     )
 }
 
@@ -1020,7 +1018,7 @@ fn render_dashboard(rows: &[Enriched], params: &PanelParams) -> Response {
 <div><h1>Xelio <span>· admin panel</span></h1>\
 <div class=\"meta\">Request activity · in-memory · times UTC</div></div>\
 <div class=\"filters\">\
-<a href=\"{refresh_href}\">Refresh</a> · <a href=\"{auto_href}\">{auto_label}</a>\
+<a href=\"{refresh_href}\">Refresh</a> · <a href=\"{auto_href}\">{auto_label}</a> · <a href=\"{export_href}\">Export CSV</a>\
 <form method=\"post\" action=\"/admin-panel/logout\" style=\"display:inline;margin-left:10px\">\
 <button class=\"ghost\" type=\"submit\">Log out</button></form>\
 </div></header>\
@@ -1055,11 +1053,15 @@ fn render_dashboard(rows: &[Enriched], params: &PanelParams) -> Response {
 <tbody>{request_rows}</tbody></table></div></section>\
 <footer>In-memory buffer (newest 10,000 requests) · resets on deploy · geo cached 24h · times UTC.\
 <br>Non-browser means the request carried no <code>Origin</code> header. Automation detection is a \
-heuristic over the user agent.</footer>\
+heuristic over the user agent.\
+<br>Challenge: {challenge_state} · durable events: {forensics_state}.</footer>\
 </div>",
         refresh_href = esc(&refresh_href),
         auto_href = esc(&auto_href),
         auto_label = auto_label,
+        export_href = esc(&format!("/admin-panel/export.csv?{}", params.query_string(false))),
+        challenge_state = challenge_state(),
+        forensics_state = forensics_state(),
         cards = cards,
         ip_rows = ip_rows,
         q_value = esc(q),
@@ -1170,6 +1172,187 @@ pub async fn logout(headers: HeaderMap) -> Response {
 }
 
 // ---------------------------------------------------------------------------
+// Export and alert controls
+// ---------------------------------------------------------------------------
+
+/// `GET /admin-panel/export.csv` — the current filtered view as CSV.
+///
+/// Same session gate as the dashboard. This exists so an operator can hand a
+/// file to a hosting provider, an abuse desk, or law enforcement without
+/// copying rows out of a browser.
+pub async fn export_csv(
+    Extension(log): Extension<Arc<AccessLog>>,
+    headers: HeaderMap,
+    Query(params): Query<PanelParams>,
+) -> Response {
+    if configured_password().is_none() {
+        return render_disabled();
+    }
+    match cookie_token(&headers) {
+        Some(token) if session_valid(&token) => {}
+        _ => return redirect_to_panel(),
+    }
+
+    // Export is not limited to the dashboard page size; the buffer caps it.
+    let rows = log.enrich(10_000, params.creates_only()).await;
+    let mut out = String::with_capacity(rows.len() * 180);
+    out.push_str(
+        "time_utc,ip,country_code,country,region,city,asn,isp,org,hosting,proxy,mobile,\
+         method,path,status,latency_ms,user_agent,origin,referer\n",
+    );
+
+    for row in rows
+        .iter()
+        .filter(|row| matches_filters(row, params.q(), params.country()))
+    {
+        let record = &row.record;
+        let geo = row.geo.as_ref();
+        let field = |value: Option<&str>| csv_field(value.unwrap_or(""));
+        let flag = |value: Option<bool>| {
+            if value.unwrap_or(false) {
+                "true"
+            } else {
+                "false"
+            }
+        };
+
+        out.push_str(&csv_field(&record.at));
+        out.push(',');
+        out.push_str(&csv_field(&record.ip));
+        out.push(',');
+        out.push_str(&field(geo.and_then(|g| g.country_code.as_deref())));
+        out.push(',');
+        out.push_str(&field(geo.and_then(|g| g.country.as_deref())));
+        out.push(',');
+        out.push_str(&field(geo.and_then(|g| g.region.as_deref())));
+        out.push(',');
+        out.push_str(&field(geo.and_then(|g| g.city.as_deref())));
+        out.push(',');
+        out.push_str(&field(geo.and_then(|g| g.asn.as_deref())));
+        out.push(',');
+        out.push_str(&field(geo.and_then(|g| g.isp.as_deref())));
+        out.push(',');
+        out.push_str(&field(geo.and_then(|g| g.org.as_deref())));
+        out.push(',');
+        out.push_str(flag(geo.map(|g| g.hosting)));
+        out.push(',');
+        out.push_str(flag(geo.map(|g| g.proxy)));
+        out.push(',');
+        out.push_str(flag(geo.map(|g| g.mobile)));
+        out.push(',');
+        out.push_str(&csv_field(&record.method));
+        out.push(',');
+        out.push_str(&csv_field(&record.path));
+        out.push(',');
+        out.push_str(&record.status.to_string());
+        out.push(',');
+        out.push_str(&record.ms.to_string());
+        out.push(',');
+        out.push_str(&csv_field(&record.user_agent));
+        out.push(',');
+        out.push_str(&field(record.origin.as_deref()));
+        out.push(',');
+        out.push_str(&field(record.referer.as_deref()));
+        out.push('\n');
+    }
+
+    let filename = format!(
+        "xelio-access-{}.csv",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+    );
+    let mut response = (StatusCode::OK, out).into_response();
+    let response_headers = response.headers_mut();
+    response_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/csv; charset=utf-8"),
+    );
+    response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Ok(value) = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
+        response_headers.insert(header::CONTENT_DISPOSITION, value);
+    }
+    response
+}
+
+/// `POST /admin-panel/alert-test` — deliver a synthetic alert so the webhook
+/// wiring can be confirmed without waiting for an incident.
+pub async fn alert_test(headers: HeaderMap) -> Response {
+    if configured_password().is_none() {
+        return render_disabled();
+    }
+    match cookie_token(&headers) {
+        Some(token) if session_valid(&token) => {}
+        _ => return redirect_to_panel(),
+    }
+
+    let alerter = crate::alerts::Alerter::from_env();
+    if !alerter.enabled() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "ALERT_WEBHOOK_URL is not set\n",
+        )
+            .into_response();
+    }
+    alerter.send_test().await;
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "test alert sent\n",
+    )
+        .into_response()
+}
+
+fn redirect_to_panel() -> Response {
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    response
+        .headers_mut()
+        .insert(header::LOCATION, HeaderValue::from_static("/admin-panel"));
+    response
+}
+
+fn csv_field(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn challenge_state() -> &'static str {
+    let enabled = std::env::var("TURNSTILE_ENABLED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+
+    if !enabled {
+        return "off (creation is unauthenticated)";
+    }
+    if std::env::var("TURNSTILE_SECRET_KEY")
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        return "enabled but TURNSTILE_SECRET_KEY is empty";
+    }
+    "enabled (Turnstile)"
+}
+
+fn forensics_state() -> String {
+    let days = std::env::var("FORENSICS_RETENTION_DAYS")
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(7)
+        .clamp(1, 90);
+    format!("access_events, {days}d retention")
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1221,6 +1404,7 @@ mod tests {
             .route("/admin-panel", get(page))
             .route("/admin-panel/login", post(login))
             .route("/admin-panel/logout", post(logout))
+            .route("/admin-panel/export.csv", get(export_csv))
             .layer(Extension(log))
     }
 
@@ -1380,6 +1564,72 @@ mod tests {
         let body = body_string(response).await;
         assert!(body.contains("type=\"password\""));
         assert!(!body.contains("203.0.113.42"));
+
+        std::env::remove_var("ADMIN_PANEL_PASSWORD");
+    }
+    #[test]
+    fn csv_fields_are_quoted_only_when_needed() {
+        assert_eq!(csv_field(""), "");
+        assert_eq!(csv_field("plain"), "plain");
+        assert_eq!(csv_field("a,b"), "\"a,b\"");
+        assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_field("line\nbreak"), "\"line\nbreak\"");
+    }
+
+    #[tokio::test]
+    async fn export_without_a_session_redirects() {
+        let _guard = lock_env();
+        reset_state();
+        std::env::set_var("ADMIN_PANEL_PASSWORD", "correct-horse");
+
+        let response = app(seeded_log("203.0.113.42", "probe"))
+            .oneshot(request(
+                "GET",
+                "/admin-panel/export.csv",
+                Body::empty(),
+                &[],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/admin-panel")
+        );
+
+        std::env::remove_var("ADMIN_PANEL_PASSWORD");
+    }
+
+    #[tokio::test]
+    async fn export_with_a_session_returns_csv() {
+        let _guard = lock_env();
+        reset_state();
+        std::env::set_var("ADMIN_PANEL_PASSWORD", "correct-horse");
+
+        let token = create_session();
+        let response = app(seeded_log("203.0.113.42", "curl/8.4.0"))
+            .oneshot(request(
+                "GET",
+                "/admin-panel/export.csv?creates_only=true",
+                Body::empty(),
+                &[("cookie", &format!("xelio_panel={}", token))],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/csv; charset=utf-8")
+        );
+        let body = body_string(response).await;
+        assert!(body.starts_with("time_utc,ip,"));
+        assert!(body.contains("203.0.113.42"));
 
         std::env::remove_var("ADMIN_PANEL_PASSWORD");
     }

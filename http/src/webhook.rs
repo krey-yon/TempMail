@@ -15,16 +15,13 @@ pub struct Payload {
 #[derive(Debug, Deserialize)]
 struct WebhookResponse {}
 
-pub async fn send_webhook(webhook_url: &str, payload: &Payload) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()?;
+pub async fn send_webhook(
+    webhook_url: &str,
+    payload: &Payload,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
 
-    let response = client
-        .post(webhook_url)
-        .json(payload)
-        .send()
-        .await?;
+    let response = client.post(webhook_url).json(payload).send().await?;
 
     if !response.status().is_success() {
         return Err(format!("Webhook request failed with status: {}", response.status()).into());

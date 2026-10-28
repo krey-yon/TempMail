@@ -167,6 +167,20 @@ For checks without PostgreSQL, run `cargo test --workspace`.
 | `DB_SSLMODE` | `prefer` | `disable`, `prefer`, or `require` |
 | `MAIL_DOMAIN` | `xelio.me` | Email domain |
 | `SMTP_PORT` | `25` | SMTP port |
+| `MAX_EMAIL_SIZE_BYTES` | `2097152` | SMTP message cap; accepted range 64 KiB - 25 MiB |
+| `TURNSTILE_ENABLED` | `false` | Require a Turnstile token on `POST /api/emails` |
+| `TURNSTILE_SITE_KEY` | (empty) | Public widget key, also used by the frontend |
+| `TURNSTILE_SECRET_KEY` | (empty) | Server-only verification secret |
+| `TURNSTILE_EXPECTED_ACTION` | `create` | Required widget action; empty disables the check |
+| `TURNSTILE_REQUIRED_HOSTNAMES` | `xelio.me,www.xelio.me` | Hostnames Cloudflare may report |
+| `ALERT_WEBHOOK_URL` | (empty) | Slack/Discord webhook; empty disables alerting |
+| `ALERT_CREATES_PER_MIN` | `60` | Alert threshold for successful creations |
+| `ALERT_REJECTIONS_PER_MIN` | `120` | Alert threshold for rejected creations |
+| `ALERT_MAILS_PER_MIN` | `60` | Alert threshold for inbound mail |
+| `ALERT_429_PER_MIN` | `30` | Alert threshold for rate-limited requests |
+| `ALERT_COOLDOWN_SECS` | `1800` | Minimum gap between repeats of one alert |
+| `PANEL_URL` | `https://api.xelio.me/admin-panel` | Link included in alert messages |
+| `FORENSICS_RETENTION_DAYS` | `7` | Retention for `access_events`, clamped to 1-90 |
 
 ## CORS
 
@@ -218,3 +232,105 @@ window expires. The passed password is never logged.
 The dashboard supports `?q=`, `?country=` (exact country code), `?creates_only=`,
 `?limit=` (default 200, max 1000), and `?refresh=1` for a 30-second meta refresh.
 
+
+### Panel export and controls
+
+| Route | Auth | Purpose |
+|-------|------|---------|
+| `GET /admin-panel/export.csv?q=&country=&creates_only=` | session cookie | Current filtered view as CSV |
+| `POST /admin-panel/alert-test` | session cookie | Deliver a synthetic alert to confirm the webhook |
+
+The CSV export is not capped at the dashboard page size: it writes every row in
+the in-memory buffer that matches the filters, so it can be handed to a host or
+an abuse desk as-is. It is served with `Cache-Control: no-store`.
+
+## Abuse gate (Cloudflare Turnstile)
+
+IP blocking cannot separate scripts from users here: the observed traffic came
+from consumer ISPs across four countries with a spoofed desktop Chrome user
+agent and no `Origin` header. A challenge is the only gate that survives that,
+so `POST /api/emails` can require a Turnstile token.
+
+Enable it in this order:
+
+1. Create a Turnstile widget for `xelio.me` and `www.xelio.me` in the Cloudflare
+   dashboard. Put the site key in `TURNSTILE_SITE_KEY` and the secret in
+   `TURNSTILE_SECRET_KEY`.
+2. Deploy the backend with `TURNSTILE_ENABLED=false`. Nothing changes yet.
+3. Ship the widget on the site (see below) with `action: "create"`.
+4. Set `TURNSTILE_ENABLED=true` and redeploy.
+
+Rolling back is the same single variable. Verification fails **closed**: if
+Cloudflare is unreachable the endpoint returns `503` instead of creating an
+unverified mailbox, and the flag is the kill switch.
+
+Reads, stats, and the panel are never challenged, so checking mail stays free of
+friction.
+
+### Frontend widget
+
+The site renders explicitly so the token can be read and refreshed:
+
+```html
+<div class="cf-turnstile" data-sitekey="TURNSTILE_SITE_KEY" data-action="create"></div>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+```
+
+Send the token with the create request and refresh it when it expires:
+
+```js
+const token = document.querySelector('[name="cf-turnstile-response"]').value;
+
+const response = await fetch("https://api.xelio.me/api/emails", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ username, turnstile_token: token }),
+});
+
+if (response.status === 403) {
+  // Token missing/expired/rejected: reset the widget and let the user retry.
+  window.turnstile.reset();
+}
+```
+
+`cf-turnstile-response` also works as a header if the body shape must stay
+unchanged.
+
+### Error codes
+
+| Status | `code` | Meaning |
+|--------|--------|---------|
+| `403` | `turnstile_missing` | No token was sent |
+| `403` | `turnstile_failed` | Cloudflare rejected the token, hostname, or action |
+| `503` | `turnstile_unavailable` | Verification could not be completed; retry later |
+
+## Alerting
+
+`ALERT_WEBHOOK_URL` turns on a once-a-minute evaluation of the last minute of
+traffic. Four signals are checked: creations, rejected creations, inbound mail
+(as an analytics delta), and `429`s. Each alert fires at most once per
+`ALERT_COOLDOWN_SECS` and includes the top creating IPs and a panel link.
+
+The payload contains both `text` and `content`, so a Slack or Discord webhook
+works unchanged. With the variable unset the task is not spawned at all and the
+API behaves exactly as before. Confirm the wiring with
+`POST /admin-panel/alert-test` while signed in.
+
+## Abuse contact
+
+`GET /abuse` is a plain HTML page for reporters, and
+`GET /.well-known/security.txt` publishes the same contact machine-readably.
+Both are public on purpose. Keep `abuse@xelio.me` forwarding to a real inbox at
+your mail provider: a mailbox here expires after 24 hours and will not receive
+the report.
+
+## Durable forensics
+
+The admin panel reads an in-memory buffer, which resets on deploy. Creation
+attempts are also written to the `access_events` table (`at`, `ip`,
+`user_agent`, `origin`, `path`, `status`) so attribution survives restarts. The
+minute scheduler deletes rows older than `FORENSICS_RETENTION_DAYS`.
+
+This table holds IP addresses, which are personal data. Keep the retention short,
+document the purpose, and treat exports accordingly. Writes are best effort: a
+failed insert is logged and never fails the request.

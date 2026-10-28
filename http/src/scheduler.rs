@@ -20,6 +20,10 @@ pub async fn start_cleanup_scheduler(db: Arc<DatabaseClient>) -> Result<(), Box<
                 Ok(count) => info!("Deleted {} old email addresses", count),
                 Err(e) => error!("Address cleanup failed: {}", e),
             }
+            match db.delete_old_access_events().await {
+                Ok(count) => info!("Deleted {} old access events", count),
+                Err(e) => error!("Access event cleanup failed: {}", e),
+            }
         })
     })?;
 

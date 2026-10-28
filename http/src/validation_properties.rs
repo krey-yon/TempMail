@@ -25,7 +25,10 @@ mod username_validation_rejection_tests {
         // Generate strings that contain at least one invalid character
         // Valid chars are: a-z, A-Z, 0-9, -, _
         // Invalid chars include: @, ., !, #, $, %, space, etc.
-        prop::string::string_regex("[a-zA-Z0-9_-]{0,10}[@.!#$%^&*() +=/\\\\|<>?;:'\",\\[\\]{}~`][a-zA-Z0-9_-]{0,10}").unwrap()
+        prop::string::string_regex(
+            "[a-zA-Z0-9_-]{0,10}[@.!#$%^&*() +=/\\\\|<>?;:'\",\\[\\]{}~`][a-zA-Z0-9_-]{0,10}",
+        )
+        .unwrap()
     }
 
     proptest! {
@@ -36,9 +39,9 @@ mod username_validation_rejection_tests {
         fn test_username_too_short_rejected(username in invalid_username_too_short()) {
             // Only test usernames that are actually too short (< 3 chars)
             prop_assume!(username.len() < 3);
-            
+
             let result = UsernameValidator::validate(&username);
-            
+
             // Should fail with InvalidLength error
             prop_assert!(result.is_err(), "Username '{}' with length {} should be rejected", username, username.len());
             prop_assert!(
@@ -53,9 +56,9 @@ mod username_validation_rejection_tests {
         fn test_username_too_long_rejected(username in invalid_username_too_long()) {
             // Only test usernames that are actually too long (> 32 chars)
             prop_assume!(username.len() > 32);
-            
+
             let result = UsernameValidator::validate(&username);
-            
+
             // Should fail with InvalidLength error
             prop_assert!(result.is_err(), "Username '{}' with length {} should be rejected", username, username.len());
             prop_assert!(
@@ -70,15 +73,15 @@ mod username_validation_rejection_tests {
         fn test_username_invalid_characters_rejected(username in invalid_username_bad_chars()) {
             // Ensure the username has valid length but contains invalid characters
             prop_assume!(username.len() >= 3 && username.len() <= 32);
-            
+
             // Verify it actually contains invalid characters
             let has_invalid_chars = username.chars().any(|c| {
                 !c.is_alphanumeric() && c != '-' && c != '_'
             });
             prop_assume!(has_invalid_chars);
-            
+
             let result = UsernameValidator::validate(&username);
-            
+
             // Should fail with InvalidCharacters error
             prop_assert!(result.is_err(), "Username '{}' with invalid characters should be rejected", username);
             prop_assert!(
@@ -93,14 +96,14 @@ mod username_validation_rejection_tests {
         #[test]
         fn test_any_invalid_username_rejected(username in ".*") {
             // Filter to only invalid usernames
-            let is_invalid = username.len() < 3 
-                || username.len() > 32 
+            let is_invalid = username.len() < 3
+                || username.len() > 32
                 || username.chars().any(|c| !c.is_alphanumeric() && c != '-' && c != '_');
-            
+
             prop_assume!(is_invalid);
-            
+
             let result = UsernameValidator::validate(&username);
-            
+
             // Should fail with some validation error
             prop_assert!(
                 result.is_err(),
@@ -108,7 +111,7 @@ mod username_validation_rejection_tests {
                 username,
                 username.len()
             );
-            
+
             // Verify the error is one of the expected types
             let err = result.unwrap_err();
             prop_assert!(
@@ -136,7 +139,8 @@ mod case_normalization_tests {
     // Strategy for generating valid usernames with mixed case
     fn valid_username_mixed_case() -> impl Strategy<Value = String> {
         // Generate usernames with at least one uppercase letter
-        prop::string::string_regex("[a-zA-Z0-9_-]{3,32}").unwrap()
+        prop::string::string_regex("[a-zA-Z0-9_-]{3,32}")
+            .unwrap()
             .prop_filter("Must contain at least one letter", |s| {
                 s.chars().any(|c| c.is_alphabetic())
             })
@@ -150,23 +154,23 @@ mod case_normalization_tests {
         fn test_username_converted_to_lowercase(username in valid_username_mixed_case()) {
             // Ensure username is valid length
             prop_assume!(username.len() >= 3 && username.len() <= 32);
-            
+
             // Ensure username contains only valid characters
             let is_valid = username.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_');
             prop_assume!(is_valid);
-            
+
             let expected_lowercase = username.to_lowercase();
             let result = UsernameValidator::validate(&username);
-            
+
             // Should succeed
             prop_assert!(
                 result.is_ok(),
                 "Valid username '{}' should be accepted",
                 username
             );
-            
+
             let normalized = result.unwrap();
-            
+
             // The normalized username should be lowercase
             prop_assert_eq!(
                 &normalized,
@@ -175,7 +179,7 @@ mod case_normalization_tests {
                 username,
                 expected_lowercase
             );
-            
+
             // Verify no uppercase letters remain
             prop_assert!(
                 !normalized.chars().any(|c| c.is_uppercase()),
@@ -198,20 +202,20 @@ mod case_normalization_tests {
                     c.to_lowercase().next().unwrap_or(c)
                 }
             }).collect::<String>();
-            
+
             // All variations should normalize to the same lowercase value
             let result_lower = UsernameValidator::validate(&lowercase);
             let result_upper = UsernameValidator::validate(&uppercase);
             let result_mixed = UsernameValidator::validate(&mixed);
-            
+
             prop_assert!(result_lower.is_ok());
             prop_assert!(result_upper.is_ok());
             prop_assert!(result_mixed.is_ok());
-            
+
             let normalized_lower = result_lower.unwrap();
             let normalized_upper = result_upper.unwrap();
             let normalized_mixed = result_mixed.unwrap();
-            
+
             // All should be equal to the lowercase version
             prop_assert_eq!(
                 &normalized_lower,

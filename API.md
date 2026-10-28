@@ -88,13 +88,21 @@ Content-Type: application/json
 **Request Body:**
 ```json
 {
-    "username": "testuser"
+    "username": "testuser",
+    "turnstile_token": "0.abc123..."
 }
 ```
 
 | Field | Type | Validation | Description |
 |-------|------|------------|-------------|
 | username | string | 3-32 chars, alphanumeric/hyphen/underscore, lowercase | Unique username for the email address |
+| turnstile_token | string | optional unless `TURNSTILE_ENABLED=true` | Token from the Cloudflare Turnstile widget. May also be sent as the `cf-turnstile-response` header. |
+
+**Human verification.** When the operator sets `TURNSTILE_ENABLED=true`, this
+endpoint verifies the token against Cloudflare before creating anything.
+Verification fails closed: if Cloudflare cannot be reached the endpoint returns
+`503` rather than letting an unverified request through. Reads are never
+challenged, so checking mail stays frictionless.
 
 **Success Response (201 Created):**
 ```json
@@ -125,6 +133,20 @@ Content-Type: application/json
     "error": "Email address already exists"
 }
 ```
+
+**Error Response (403 Forbidden):** the Turnstile token was missing or rejected.
+```json
+{
+    "success": false,
+    "data": null,
+    "error": "Human verification failed. Reload the page and try again.",
+    "code": "turnstile_failed"
+}
+```
+
+`code` is one of `turnstile_missing`, `turnstile_failed`, or
+`turnstile_unavailable` (the last comes with `503`). It is omitted on every
+other error response.
 
 ---
 
@@ -344,6 +366,15 @@ GET /api/stats
 
 ---
 
+### Abuse Contact
+
+`GET /abuse` serves a plain HTML page describing what Xelio is, how to report
+abuse, and what evidence to include. `GET /.well-known/security.txt` publishes
+the same contact in machine-readable form. Both are public and unauthenticated
+on purpose: providers and reporters need somewhere to land.
+
+---
+
 ### Request Inspector (admin)
 
 Records recent requests so direct-to-API abuse can be attributed to an IP. Both
@@ -435,7 +466,7 @@ QUIT
 
 ### Limits
 
-- **Max email size:** 10 MB (10,485,760 bytes)
+- **Max email size:** 2 MB (2,097,152 bytes) by default, configurable with `MAX_EMAIL_SIZE_BYTES` (accepted range 64 KiB - 25 MiB); larger messages are refused with `552`
 - **Max recipients per email:** 100
 - **Connection timeout:** 30 seconds
 - **Max transaction time:** 5 minutes

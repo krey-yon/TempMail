@@ -7,6 +7,12 @@ use std::{env, error::Error};
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{error, info};
 
+const ACCESS_EVENT_FIELD_LIMIT: usize = 512;
+
+fn truncate_access_event_field(value: &str) -> String {
+    value.chars().take(ACCESS_EVENT_FIELD_LIMIT).collect()
+}
+
 fn token_eq(stored: &str, presented: &str) -> bool {
     if stored.len() != presented.len() {
         return false;
@@ -59,7 +65,11 @@ async fn lock_address(
     tx: &tokio_postgres::Transaction<'_>,
     address: &str,
 ) -> Result<(), tokio_postgres::Error> {
-    tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&address]).await?;
+    tx.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&address],
+    )
+    .await?;
     Ok(())
 }
 
@@ -67,11 +77,25 @@ async fn remove_mailbox(
     tx: &tokio_postgres::Transaction<'_>,
     address: &str,
 ) -> Result<u64, tokio_postgres::Error> {
-    tx.execute("DELETE FROM mail WHERE recipients = $1", &[&address]).await?;
-    tx.execute("DELETE FROM user_config WHERE mail = $1 OR address = $1", &[&address]).await?;
-    tx.execute("DELETE FROM quota WHERE address = $1", &[&address]).await?;
-    tx.execute("DELETE FROM email_registry WHERE username = split_part($1, '@', 1)", &[&address]).await?;
-    tx.execute("DELETE FROM email_addresses WHERE address = $1", &[&address]).await
+    tx.execute("DELETE FROM mail WHERE recipients = $1", &[&address])
+        .await?;
+    tx.execute(
+        "DELETE FROM user_config WHERE mail = $1 OR address = $1",
+        &[&address],
+    )
+    .await?;
+    tx.execute("DELETE FROM quota WHERE address = $1", &[&address])
+        .await?;
+    tx.execute(
+        "DELETE FROM email_registry WHERE username = split_part($1, '@', 1)",
+        &[&address],
+    )
+    .await?;
+    tx.execute(
+        "DELETE FROM email_addresses WHERE address = $1",
+        &[&address],
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -116,12 +140,14 @@ impl DatabaseClient {
                 .unwrap_or_else(|_| "5432".to_string())
                 .parse()?,
         );
-        pg_config.ssl_mode(match env::var("DB_SSLMODE").as_deref().unwrap_or("prefer") {
-            "disable" => tokio_postgres::config::SslMode::Disable,
-            "prefer" => tokio_postgres::config::SslMode::Prefer,
-            "require" => tokio_postgres::config::SslMode::Require,
-            _ => return Err("DB_SSLMODE must be disable, prefer, or require".into()),
-        });
+        pg_config.ssl_mode(
+            match env::var("DB_SSLMODE").as_deref().unwrap_or("prefer") {
+                "disable" => tokio_postgres::config::SslMode::Disable,
+                "prefer" => tokio_postgres::config::SslMode::Prefer,
+                "require" => tokio_postgres::config::SslMode::Require,
+                _ => return Err("DB_SSLMODE must be disable, prefer, or require".into()),
+            },
+        );
 
         let mut root_store = rustls::RootCertStore::empty();
         let certs = load_native_certs();
@@ -144,7 +170,9 @@ impl DatabaseClient {
         let client = pool.get().await?;
 
         // Create extension separately (ignore errors if already exists)
-        let _ = client.execute("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\"", &[]).await;
+        let _ = client
+            .execute("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\"", &[])
+            .await;
 
         // Create tables
         let sql: &str = r#"
@@ -216,6 +244,18 @@ impl DatabaseClient {
                 created_at TEXT NOT NULL DEFAULT (now()::text)
             );
             CREATE INDEX IF NOT EXISTS email_registry_username_idx ON email_registry(username);
+
+            CREATE TABLE IF NOT EXISTS access_events (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                ip TEXT NOT NULL,
+                user_agent TEXT,
+                origin TEXT,
+                path TEXT NOT NULL,
+                status INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS access_events_at ON access_events(at);
+            CREATE INDEX IF NOT EXISTS access_events_ip ON access_events(ip);
         "#;
 
         if let Err(e) = client.batch_execute(sql).await {
@@ -234,7 +274,9 @@ impl DatabaseClient {
             return Err(Box::new(e));
         }
 
-        client.batch_execute(include_str!("../migrations/004_reusable_usernames.sql")).await?;
+        client
+            .batch_execute(include_str!("../migrations/004_reusable_usernames.sql"))
+            .await?;
 
         info!("Database initialized successfully with connection pooling");
         Ok(DatabaseClient { pool })
@@ -242,13 +284,19 @@ impl DatabaseClient {
 
     // ============== MAIL OPERATIONS ==============
 
-    pub async fn get_active_mailbox(&self, address: &str) -> Result<Option<MailRecipient>, Box<dyn Error + Send + Sync>> {
+    pub async fn get_active_mailbox(
+        &self,
+        address: &str,
+    ) -> Result<Option<MailRecipient>, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
         let row = client.query_opt(
             "SELECT id::text FROM email_addresses WHERE address = $1 AND created_at::timestamp > (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours'",
             &[&address],
         ).await?;
-        Ok(row.map(|row| MailRecipient { address: address.to_string(), mailbox_id: row.get(0) }))
+        Ok(row.map(|row| MailRecipient {
+            address: address.to_string(),
+            mailbox_id: row.get(0),
+        }))
     }
 
     // Save all recipients before SMTP acknowledges DATA. The captured mailbox
@@ -284,10 +332,13 @@ impl DatabaseClient {
                 "INSERT INTO mail (date, sender, recipients, data) VALUES ((clock_timestamp() AT TIME ZONE 'UTC')::text, $1, $2, $3)",
                 &[&data.sender, &recipient.address, &data.content],
             ).await?;
-            let webhook = tx.query_opt(
-                "SELECT web_hook_address FROM user_config WHERE mail = $1",
-                &[&recipient.address],
-            ).await?.and_then(|row| row.get::<_, Option<String>>(0));
+            let webhook = tx
+                .query_opt(
+                    "SELECT web_hook_address FROM user_config WHERE mail = $1",
+                    &[&recipient.address],
+                )
+                .await?
+                .and_then(|row| row.get::<_, Option<String>>(0));
             notifications.push((recipient.address.clone(), webhook));
         }
         let count = recipients.len() as i64;
@@ -348,7 +399,12 @@ impl DatabaseClient {
         }
     }
 
-    pub async fn get_mail_by_id(&self, id: &str, address: &str, token: &str) -> Result<Option<MailRow>, Box<dyn Error + Send + Sync>> {
+    pub async fn get_mail_by_id(
+        &self,
+        id: &str,
+        address: &str,
+        token: &str,
+    ) -> Result<Option<MailRow>, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
         let sql = "SELECT m.id::text, m.date, m.sender, m.recipients, m.data FROM mail m JOIN email_addresses ea ON ea.address = m.recipients WHERE m.id::text = $1 AND ea.address = $2 AND ea.access_token = $3 AND ea.created_at::timestamp > (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours'";
         match client.query_opt(sql, &[&id, &address, &token]).await {
@@ -367,7 +423,12 @@ impl DatabaseClient {
         }
     }
 
-    pub async fn delete_mail(&self, id: &str, address: &str, token: &str) -> Result<u64, Box<dyn Error + Send + Sync>> {
+    pub async fn delete_mail(
+        &self,
+        id: &str,
+        address: &str,
+        token: &str,
+    ) -> Result<u64, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
         let sql = "DELETE FROM mail m USING email_addresses ea WHERE m.recipients = ea.address AND m.id::text = $1 AND ea.address = $2 AND ea.access_token = $3 AND ea.created_at::timestamp > (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours'";
         match client.execute(sql, &[&id, &address, &token]).await {
@@ -381,7 +442,10 @@ impl DatabaseClient {
 
     // ============== QUOTA OPERATIONS ==============
 
-    pub async fn get_quota(&self, address: &str) -> Result<Option<(i32, i32)>, Box<dyn Error + Send + Sync>> {
+    pub async fn get_quota(
+        &self,
+        address: &str,
+    ) -> Result<Option<(i32, i32)>, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
         let sql = "SELECT quota_limit, completed FROM quota WHERE address = $1";
         match client.query_one(sql, &[&address]).await {
@@ -406,7 +470,11 @@ impl DatabaseClient {
         }
     }
 
-    pub async fn create_quota(&self, address: &str, limit: i32) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub async fn create_quota(
+        &self,
+        address: &str,
+        limit: i32,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut retry_count = 0;
         let max_retries = 3;
 
@@ -417,9 +485,16 @@ impl DatabaseClient {
                     match client.execute(sql, &[&address, &limit]).await {
                         Ok(_) => return Ok(()),
                         Err(e) if retry_count < max_retries - 1 => {
-                            error!("Failed to create quota (attempt {}): {}", retry_count + 1, e);
+                            error!(
+                                "Failed to create quota (attempt {}): {}",
+                                retry_count + 1,
+                                e
+                            );
                             retry_count += 1;
-                            tokio::time::sleep(tokio::time::Duration::from_millis(100 * (retry_count as u64))).await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                100 * (retry_count as u64),
+                            ))
+                            .await;
                             continue;
                         }
                         Err(e) => {
@@ -429,9 +504,16 @@ impl DatabaseClient {
                     }
                 }
                 Err(e) if retry_count < max_retries - 1 => {
-                    error!("Failed to get connection for quota (attempt {}): {}", retry_count + 1, e);
+                    error!(
+                        "Failed to get connection for quota (attempt {}): {}",
+                        retry_count + 1,
+                        e
+                    );
                     retry_count += 1;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100 * (retry_count as u64))).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(
+                        100 * (retry_count as u64),
+                    ))
+                    .await;
                 }
                 Err(e) => {
                     error!("Failed to get connection for quota: {}", e);
@@ -444,7 +526,10 @@ impl DatabaseClient {
 
     // ============== WEBHOOK OPERATIONS ==============
 
-    pub async fn get_webhook_url(&self, mail: &str) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+    pub async fn get_webhook_url(
+        &self,
+        mail: &str,
+    ) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
         let sql = "SELECT web_hook_address FROM user_config WHERE mail = $1";
         match client.query_one(sql, &[&mail]).await {
@@ -457,7 +542,11 @@ impl DatabaseClient {
         }
     }
 
-    pub async fn set_webhook(&self, mail: &str, webhook_url: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub async fn set_webhook(
+        &self,
+        mail: &str,
+        webhook_url: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
         let sql = "INSERT INTO user_config (mail, address, web_hook_address) VALUES ($1, $2, $3) ON CONFLICT (mail) DO UPDATE SET web_hook_address = $3";
         let address = mail.split('@').next().unwrap_or(mail);
@@ -472,7 +561,10 @@ impl DatabaseClient {
 
     // ============== EMAIL ADDRESS OPERATIONS (for HTTP API) ==============
 
-    pub async fn create_email_address(&self, username: &str) -> Result<EmailAddress, Box<dyn Error + Send + Sync>> {
+    pub async fn create_email_address(
+        &self,
+        username: &str,
+    ) -> Result<EmailAddress, Box<dyn Error + Send + Sync>> {
         let domain = env::var("MAIL_DOMAIN").unwrap_or_else(|_| "xelio.me".to_string());
         let address = format!("{}@{}", username, domain);
         let mut client = self.pool.get().await?;
@@ -485,7 +577,11 @@ impl DatabaseClient {
         ).await?;
         if let Some(row) = existing {
             if !row.get::<_, bool>(0) {
-                return Err(format!("Username '{}' is already taken. Please choose a different username.", username).into());
+                return Err(format!(
+                    "Username '{}' is already taken. Please choose a different username.",
+                    username
+                )
+                .into());
             }
         }
         // Also clear any orphaned data left by older versions. This never runs
@@ -500,7 +596,8 @@ impl DatabaseClient {
         tx.execute(
             "INSERT INTO quota (address, quota_limit, completed) VALUES ($1, 1000, 0)",
             &[&address],
-        ).await?;
+        )
+        .await?;
         tx.execute(
             "INSERT INTO email_registry (username, created_at) VALUES ($1, $2) ON CONFLICT (username) DO UPDATE SET created_at = EXCLUDED.created_at",
             &[&username, &created_at],
@@ -510,7 +607,11 @@ impl DatabaseClient {
             &[],
         ).await?;
         tx.commit().await?;
-        Ok(EmailAddress { address, created_at: Some(created_at), access_token: Some(access_token) })
+        Ok(EmailAddress {
+            address,
+            created_at: Some(created_at),
+            access_token: Some(access_token),
+        })
     }
 
     pub async fn mailbox_token_matches(
@@ -536,7 +637,11 @@ impl DatabaseClient {
         }
     }
 
-    pub async fn delete_email_address(&self, address: &str, token: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {
+    pub async fn delete_email_address(
+        &self,
+        address: &str,
+        token: &str,
+    ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
         lock_address(&tx, address).await?;
@@ -544,7 +649,8 @@ impl DatabaseClient {
             "SELECT access_token FROM email_addresses WHERE address = $1 AND created_at::timestamp > (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours'",
             &[&address],
         ).await?;
-        let valid = row.and_then(|row| row.get::<_, Option<String>>(0))
+        let valid = row
+            .and_then(|row| row.get::<_, Option<String>>(0))
             .is_some_and(|stored| token_eq(&stored, token));
         if !valid {
             return Ok(false);
@@ -579,7 +685,9 @@ impl DatabaseClient {
         Ok(deleted_count)
     }
 
-    pub async fn list_email_addresses(&self) -> Result<Vec<EmailAddressInfo>, Box<dyn Error + Send + Sync>> {
+    pub async fn list_email_addresses(
+        &self,
+    ) -> Result<Vec<EmailAddressInfo>, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
         let sql = r#"
             SELECT
@@ -608,7 +716,9 @@ impl DatabaseClient {
         }
     }
 
-    pub async fn list_registered_usernames(&self) -> Result<Vec<EmailRegistryEntry>, Box<dyn Error + Send + Sync>> {
+    pub async fn list_registered_usernames(
+        &self,
+    ) -> Result<Vec<EmailRegistryEntry>, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
         let sql = "SELECT username, created_at FROM email_registry ORDER BY created_at DESC";
         match client.query(sql, &[]).await {
@@ -629,9 +739,68 @@ impl DatabaseClient {
         }
     }
 
+    // ============== ACCESS EVENT OPERATIONS ==============
+
+    pub async fn log_access_event(
+        &self,
+        ip: &str,
+        user_agent: &str,
+        origin: Option<&str>,
+        path: &str,
+        status: i32,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let client = self.pool.get().await?;
+        let user_agent = truncate_access_event_field(user_agent);
+        let origin = origin.map(truncate_access_event_field);
+        match client
+            .execute(
+                "INSERT INTO access_events (ip, user_agent, origin, path, status) VALUES ($1, $2, $3, $4, $5)",
+                &[&ip, &user_agent, &origin, &path, &status],
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                error!("Failed to log access event: {}", e);
+                Err(Box::new(e))
+            }
+        }
+    }
+
+    pub async fn delete_old_access_events(&self) -> Result<u64, Box<dyn Error + Send + Sync>> {
+        let client = self.pool.get().await?;
+        let retention_days = env::var("FORENSICS_RETENTION_DAYS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(7)
+            .clamp(1, 90);
+        let retention_days = retention_days.to_string();
+        match client
+            .execute(
+                "DELETE FROM access_events WHERE at < now() - ($1::text || ' days')::interval",
+                &[&retention_days],
+            )
+            .await
+        {
+            Ok(rows) => {
+                if rows > 0 {
+                    info!("Deleted {} old access events", rows);
+                }
+                Ok(rows)
+            }
+            Err(e) => {
+                error!("Failed to delete old access events: {}", e);
+                Err(Box::new(e))
+            }
+        }
+    }
+
     // ============== ANALYTICS OPERATIONS ==============
 
-    pub async fn increment_analytics(&self, event_type: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub async fn increment_analytics(
+        &self,
+        event_type: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
         let sql = r#"
             INSERT INTO analytics (event_type, event_count, last_updated)
@@ -651,7 +820,8 @@ impl DatabaseClient {
 
     pub async fn get_analytics(&self) -> Result<Vec<AnalyticsRow>, Box<dyn Error + Send + Sync>> {
         let client = self.pool.get().await?;
-        let sql = "SELECT event_type, event_count, last_updated FROM analytics ORDER BY event_count DESC";
+        let sql =
+            "SELECT event_type, event_count, last_updated FROM analytics ORDER BY event_count DESC";
         match client.query(sql, &[]).await {
             Ok(rows) => {
                 let analytics: Vec<AnalyticsRow> = rows
@@ -684,7 +854,6 @@ impl DatabaseClient {
             total_addresses_created: row.get(3),
         })
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
